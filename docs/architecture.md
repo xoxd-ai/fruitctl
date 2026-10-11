@@ -21,6 +21,16 @@ The indicator/capture path is separate. Existing `vnc_command`, `action_queue`,
 and completion tool names remain compatible while their implementation is
 refactored. See the [MCP schemas](../tools/index.js) for actual action names.
 
+The current-source SSH relay stops admitting clients when shutdown begins.
+Its directly spawned SSH child and local listener share one monotonic retirement
+cutoff, with a two-second default; inherited timeouts, deadlines and cancellation
+can only shorten retirement. Success requires both the child's drained `close`
+event and the listener's close callback. Abort, deadline expiry or unknown
+closure returns sticky `release_unconfirmed`, including during startup cleanup
+or bridge loss; late closure cannot revise that result or replay input. This
+source repair is newer than immutable alpha.7 and is not installed-runtime or
+Home Manager delivery qualification.
+
 ## Session and credential ownership
 
 One broker owns each target's live control state. The operator selects a named

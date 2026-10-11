@@ -12,7 +12,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createBroker } from '../lib/broker/server.mjs';
 import { BrokerExecutor } from '../lib/broker/client.mjs';
 import { createRelay } from '../lib/broker/relay.mjs';
-import { readFrames, writeFrame } from '../lib/broker/protocol.mjs';
+import { readFrames, writeFrame, errorRecord } from '../lib/broker/protocol.mjs';
 
 async function fixture() {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'fruitctl-review-'));
@@ -638,4 +638,320 @@ test('relay bind failure tears down the SSH child created during startup', async
     if (!terminations) child?.kill();
     await fs.rm(directory, { recursive: true, force: true });
   }
+});
+
+async function boundedRelayResult(promise, timeoutMs = 500) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('relay retirement exceeded the fixture bound')), timeoutMs);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
+async function ownedRelayFixture(t, onKill = () => false) {
+  const { directory } = await fixture();
+  const socketPath = path.join(directory, 'relay.sock');
+  const signals = [], packets = [], sockets = new Set();
+  let child, childClosed = false;
+  const finishChild = (signal = 'SIGKILL') => {
+    if (childClosed) return;
+    childClosed = true;
+    child.signalCode = signal;
+    child.stdout.end();
+    child.stderr.end();
+    child.emit('exit', null, signal);
+    child.emit('close', null, signal);
+  };
+  const relay = await createRelay({
+    socketPath, bridge: 'fixture@darwin',
+    spawnSSH: () => {
+      child = new EventEmitter();
+      child.exitCode = null;
+      child.signalCode = null;
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      readFrames(child.stdin, packet => packets.push(packet), () => {});
+      child.kill = signal => {
+        signals.push(signal);
+        return onKill(signal, finishChild);
+      };
+      return child;
+    },
+  });
+  const originalClose = relay.server.close.bind(relay.server);
+  let heldListener;
+  const holdListener = () => {
+    const state = heldListener = { calls: 0 };
+    relay.server.close = callback => {
+      state.calls++;
+      state.callback = callback;
+      return relay.server;
+    };
+    state.release = () => {
+      if (state.releasing) return state.releasing;
+      relay.server.close = originalClose;
+      state.releasing = new Promise((resolve, reject) => originalClose(error => {
+        state.callback?.(error);
+        if (error) reject(error);
+        else resolve();
+      }));
+      return state.releasing;
+    };
+    return state;
+  };
+  const connect = async () => {
+    const socket = net.connect(socketPath);
+    sockets.add(socket);
+    socket.on('error', () => {});
+    socket.resume();
+    await boundedRelayResult(new Promise((resolve, reject) => {
+      socket.once('connect', resolve);
+      socket.once('error', reject);
+    }));
+    return socket;
+  };
+  t.after(async () => {
+    // Reconcile only these synthetic resources after assertions. Closing an
+    // old child's fixture does not clear the same relay's sticky failure.
+    const closing = relay.close();
+    finishChild();
+    for (const socket of sockets) socket.destroy();
+    try {
+      if (heldListener) {
+        await waitUntil(() => heldListener.calls > 0);
+        await boundedRelayResult(heldListener.release());
+      }
+      const failure = await boundedRelayResult(closing.then(() => null, error => error));
+      if (failure) assert.equal(failure.code, 'release_unconfirmed');
+      assert.equal(childClosed, true);
+      assert.equal(relay.server.listening, false);
+    } finally {
+      relay.server.close = originalClose;
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+  return { relay, child, signals, packets, connect, finishChild, holdListener,
+    get childClosed() { return childClosed; } };
+}
+
+test('relay later timeout callers tighten one retirement and cannot extend it', async t => {
+  const owned = await ownedRelayFixture(t);
+  const closing = owned.relay.close({ timeoutMs: 2000 });
+  assert.strictEqual(owned.relay.close({ timeoutMs: 40 }), closing);
+  assert.strictEqual(owned.relay.close({ timeoutMs: 2000 }), closing);
+  const failure = await boundedRelayResult(closing.then(() => null, error => error));
+  assert.equal(failure.code, 'release_unconfirmed');
+  assert.equal(owned.childClosed, false, 'an attempted TERM/KILL does not prove child close');
+  assert.deepEqual(owned.signals, ['SIGTERM', 'SIGKILL']);
+  owned.finishChild();
+  assert.strictEqual(await owned.relay.close().catch(error => error), failure,
+    'late owned close cannot replace the earlier unconfirmed result');
+});
+
+test('relay expired inherited deadline tightens pending retirement immediately', async t => {
+  const owned = await ownedRelayFixture(t);
+  const closing = owned.relay.close({ timeoutMs: 2000 });
+  assert.strictEqual(owned.relay.close({ timeoutMs: 30000, deadline: performance.now() - 1 }), closing);
+  const failure = await boundedRelayResult(closing.catch(error => error));
+  assert.equal(failure.code, 'release_unconfirmed');
+  assert.deepEqual(owned.signals, ['SIGTERM', 'SIGKILL']);
+  assert.equal(owned.childClosed, false);
+  owned.finishChild();
+  assert.strictEqual(await owned.relay.close().catch(error => error), failure);
+});
+
+test('relay initially expired deadline stays unconfirmed when owned resources close next turn', async t => {
+  const owned = await ownedRelayFixture(t, (signal, finish) => {
+    if (signal === 'SIGTERM') queueMicrotask(() => finish(signal));
+    return true;
+  });
+  const closing = owned.relay.close({ deadline: performance.now() - 1 });
+  const failure = await boundedRelayResult(closing.catch(error => error));
+  assert.equal(failure.code, 'release_unconfirmed');
+  await waitUntil(() => owned.childClosed && !owned.relay.server.listening);
+  assert.strictEqual(await owned.relay.close().catch(error => error), failure,
+    'prompt late close does not undo an already-expired caller cutoff');
+});
+
+test('relay pre-aborted close rejects without exposing the caller reason or waiting for exit', async t => {
+  const owned = await ownedRelayFixture(t);
+  const controller = new AbortController();
+  controller.abort(new Error('synthetic private cancellation diagnostic'));
+  const closing = owned.relay.close({ signal: controller.signal, timeoutMs: 2000 });
+  const failure = await boundedRelayResult(closing.catch(error => error));
+  assert.equal(failure.code, 'release_unconfirmed');
+  assert.equal(failure.message, 'Relay owned shutdown is unconfirmed');
+  assert.equal(owned.childClosed, false);
+  assert.deepEqual(owned.signals, ['SIGTERM', 'SIGKILL']);
+  owned.finishChild();
+  assert.strictEqual(owned.relay.close(), closing);
+  assert.strictEqual(await closing.catch(error => error), failure);
+});
+
+test('relay listener callback stall has the same cutoff and refuses new input before late closure', async t => {
+  const owned = await ownedRelayFixture(t, (signal, finish) => {
+    if (signal === 'SIGTERM') queueMicrotask(() => finish(signal));
+    return true;
+  });
+  const originalClient = await owned.connect();
+  writeFrame(originalClient, { v: 1, kind: 'open', id: 'before-close', target: 'desktop' });
+  await waitUntil(() => owned.packets.length === 1);
+  const held = owned.holdListener();
+  const closing = owned.relay.close({ timeoutMs: 40 });
+  await waitUntil(() => held.calls === 1 && owned.childClosed);
+  const successor = await owned.connect();
+  const refused = successor.destroyed ? Promise.resolve() : new Promise(resolve => successor.once('close', resolve));
+  // The intentionally stalled local listener still accepts at the OS level;
+  // the relay must destroy that connection without forwarding its input.
+  successor.write(JSON.stringify({ v: 1, kind: 'execute', id: 'successor',
+    actions: [{ action: 'click', x: 1, y: 1 }] }) + '\n');
+  await boundedRelayResult(refused);
+  assert.equal(owned.packets.length, 1);
+  const failure = await boundedRelayResult(closing.catch(error => error));
+  assert.equal(failure.code, 'release_unconfirmed');
+  assert.equal(held.calls, 1, 'one listener close remains owned across later callers');
+  assert.deepEqual(owned.signals, ['SIGTERM'], 'a drained child is never signalled again');
+  await boundedRelayResult(held.release());
+  assert.strictEqual(owned.relay.close(), closing);
+  assert.strictEqual(await closing.catch(error => error), failure);
+  assert.equal(owned.packets.length, 1, 'late cleanup cannot replay the rejected successor');
+});
+
+test('relay later caller cancellation interrupts an already pending listener retirement', async t => {
+  const owned = await ownedRelayFixture(t, (signal, finish) => {
+    if (signal === 'SIGTERM') queueMicrotask(() => finish(signal));
+    return true;
+  });
+  const held = owned.holdListener();
+  const closing = owned.relay.close({ timeoutMs: 2000 });
+  await waitUntil(() => held.calls === 1 && owned.childClosed);
+  const controller = new AbortController();
+  assert.strictEqual(owned.relay.close({ signal: controller.signal, timeoutMs: 2000 }), closing);
+  controller.abort(new Error('synthetic private abort detail'));
+  const failure = await boundedRelayResult(closing.catch(error => error));
+  assert.equal(failure.code, 'release_unconfirmed');
+  assert.equal(failure.message, 'Relay owned shutdown is unconfirmed');
+  assert.deepEqual(owned.signals, ['SIGTERM']);
+  await boundedRelayResult(held.release());
+  assert.strictEqual(await owned.relay.close().catch(error => error), failure);
+});
+
+test('relay refused and throwing child termination remains unconfirmed after late drained close', async t => {
+  const owned = await ownedRelayFixture(t, signal => {
+    if (signal === 'SIGKILL') throw new Error('synthetic private signal diagnostic');
+    return false;
+  });
+  const closing = owned.relay.close({ timeoutMs: 40 });
+  const failure = await boundedRelayResult(closing.catch(error => error));
+  assert.equal(failure.code, 'release_unconfirmed');
+  assert.equal(failure.message, 'Relay owned shutdown is unconfirmed');
+  assert.equal(owned.childClosed, false);
+  assert.equal(owned.child.listenerCount('close'), 1, 'late owned closure stays observed');
+  assert.deepEqual(owned.signals, ['SIGTERM', 'SIGKILL']);
+  owned.finishChild();
+  assert.equal(owned.child.listenerCount('close'), 0, 'the actual late close is recorded');
+  assert.strictEqual(await owned.relay.close().catch(error => error), failure);
+  assert.deepEqual(owned.signals, ['SIGTERM', 'SIGKILL']);
+});
+
+test('relay child exit without drained close cannot confirm retirement or invite further signals', async t => {
+  const owned = await ownedRelayFixture(t);
+  const closing = owned.relay.close({ timeoutMs: 40 });
+  owned.child.signalCode = 'SIGTERM';
+  owned.child.emit('exit', null, 'SIGTERM');
+  const failure = await boundedRelayResult(closing.catch(error => error));
+  assert.equal(failure.code, 'release_unconfirmed');
+  assert.equal(owned.childClosed, false);
+  assert.deepEqual(owned.signals, ['SIGTERM'], 'known exit prevents signalling a possibly reused PID');
+  owned.finishChild('SIGTERM');
+  assert.strictEqual(await owned.relay.close().catch(error => error), failure);
+});
+
+test('relay bridge failure shares retirement with later caller cutoffs and preserves sanitized error', async t => {
+  const owned = await ownedRelayFixture(t);
+  owned.child.stdin.emit('error', Object.assign(new Error('synthetic private SSH pipe diagnostic'), { code: 'EPIPE' }));
+  await assert.rejects(owned.relay.failure, error =>
+    error.message === 'Fruitctl SSH bridge lost; input was not replayed');
+  const closing = owned.relay.close({ timeoutMs: 40 });
+  assert.strictEqual(owned.relay.close({ timeoutMs: 2000 }), closing);
+  const failure = await boundedRelayResult(closing.catch(error => error));
+  assert.equal(failure.code, 'release_unconfirmed');
+  assert.deepEqual(owned.signals, ['SIGTERM', 'SIGKILL']);
+  owned.finishChild();
+  assert.strictEqual(await owned.relay.close().catch(error => error), failure);
+});
+
+test('relay server errors after startup fail safely and interrupt pending owned retirement', async t => {
+  const owned = await ownedRelayFixture(t);
+  assert.doesNotThrow(() => owned.relay.server.emit('error', new Error('synthetic private listener diagnostic')));
+  await assert.rejects(owned.relay.failure, error =>
+    error.message === 'Fruitctl SSH bridge lost; input was not replayed');
+  const closing = owned.relay.close({ timeoutMs: 2000 });
+  assert.doesNotThrow(() => owned.relay.server.emit('error', new Error('synthetic in-flight listener diagnostic')));
+  const failure = await boundedRelayResult(closing.catch(error => error));
+  assert.equal(failure.code, 'release_unconfirmed');
+  assert.deepEqual(owned.signals, ['SIGTERM', 'SIGKILL']);
+  assert.doesNotThrow(() => owned.relay.server.emit('error', new Error('synthetic later listener diagnostic')));
+  owned.finishChild();
+  assert.strictEqual(await owned.relay.close().catch(error => error), failure);
+});
+
+test('relay unknown listener close error is sanitized and cannot be revised by child closure', async t => {
+  const owned = await ownedRelayFixture(t);
+  const originalClose = owned.relay.server.close.bind(owned.relay.server);
+  owned.relay.server.close = callback => originalClose(() =>
+    callback(new Error('synthetic private listener diagnostic')));
+  const closing = owned.relay.close({ timeoutMs: 2000 });
+  const failure = await boundedRelayResult(closing.catch(error => error));
+  assert.equal(failure.code, 'release_unconfirmed');
+  assert.equal(failure.message, 'Relay owned shutdown is unconfirmed');
+  assert.deepEqual(owned.signals, ['SIGTERM', 'SIGKILL']);
+  owned.finishChild();
+  assert.strictEqual(await owned.relay.close().catch(error => error), failure);
+});
+
+test('relay bind failure preserves its primary cause when owned child cleanup is unconfirmed', async t => {
+  const { directory } = await fixture();
+  const socketPath = path.join(directory, 'startup.sock');
+  const signals = [];
+  let child;
+  t.after(async () => {
+    if (child) {
+      child.signalCode = 'SIGKILL';
+      child.stdout.end();
+      child.stderr.end();
+      child.emit('exit', null, 'SIGKILL');
+      child.emit('close', null, 'SIGKILL');
+      assert.equal(child.listenerCount('close'), 0, 'late startup child close stays observed');
+    }
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+  const startup = createRelay({
+    socketPath, bridge: 'fixture@darwin',
+    spawnSSH: () => {
+      writeFileSync(socketPath, 'intervening fixture', { mode: 0o600 });
+      child = new EventEmitter();
+      child.exitCode = null;
+      child.signalCode = null;
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.kill = signal => { signals.push(signal); return false; };
+      return child;
+    },
+  });
+  const failure = await boundedRelayResult(startup.catch(error => error), 2500);
+  assert.ok(failure instanceof AggregateError);
+  assert.equal(failure.code, 'release_unconfirmed');
+  assert.equal(failure.message, 'Fruitctl SSH bridge startup cleanup is unconfirmed');
+  assert.equal(failure.cause.code, 'EADDRINUSE');
+  assert.strictEqual(failure.errors[0], failure.cause);
+  assert.equal(failure.errors[1].code, 'release_unconfirmed');
+  assert.deepEqual(errorRecord(failure), {
+    message: 'Fruitctl SSH bridge startup cleanup is unconfirmed', code: 'release_unconfirmed',
+  }, 'public error output does not expose the bind path or local nested errors');
+  assert.equal(child.listenerCount('close'), 1, 'a deadline is not owned child close');
+  assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
 });

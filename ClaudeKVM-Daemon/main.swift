@@ -254,6 +254,7 @@ struct ClaudeKVMDaemon: AsyncParsableCommand {
         notify("ready", params: [
             "scaledWidth": .int(scaling.scaledWidth),
             "scaledHeight": .int(scaling.scaledHeight),
+            "capabilities": .strings(PCRequest.supportedMethods),
         ])
 
         let input = InputController(vnc: vnc)

@@ -9,7 +9,8 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createBroker } from '../lib/broker/server.mjs';
+import { createBroker, TargetLane } from '../lib/broker/server.mjs';
+import { nativeCapabilities, requireNativeActions, preAdmissionRefusal } from '../lib/mcp/capabilities.js';
 import { BrokerExecutor } from '../lib/broker/client.mjs';
 import { createRelay } from '../lib/broker/relay.mjs';
 import { readFrames, writeFrame, errorRecord } from '../lib/broker/protocol.mjs';
@@ -19,6 +20,92 @@ async function fixture() {
   await fs.chmod(directory, 0o700);
   return { directory, socketPath: path.join(directory, 'broker.sock') };
 }
+
+test('local pre-admission refusal retains the healthy owner and already queued compatible work', async () => {
+  let spawns = 0;
+  const calls = [];
+  const closes = [];
+  const capabilities = nativeCapabilities(['wait', 'health']);
+  const lane = new TargetLane({}, async () => {
+    spawns++;
+    return {
+      preflight(actions) { requireNativeActions(actions, capabilities); },
+      async execute(actions) { calls.push(...actions); return actions.map(() => ({ result: { detail: 'OK' } })); },
+      async close(options) { closes.push(options); },
+    };
+  });
+  lane.acquire('owner');
+  try {
+    const unsupported = lane.execute([{ action: 'wait' }, { action: 'detect_elements' }]);
+    const successor = lane.execute([{ action: 'health' }]);
+    await assert.rejects(unsupported, /Action unavailable/);
+    assert.equal((await successor)[0].result.detail, 'OK');
+    assert.deepEqual(calls, [{ action: 'health' }]);
+    assert.deepEqual(closes, []);
+    assert.equal(spawns, 1);
+    assert.equal(lane.owner, 'owner');
+    assert.equal(lane.releasing, undefined);
+    assert.throws(() => lane.acquire('another-owner'), /another session/);
+  } finally { await lane.close(); }
+});
+
+test('a forged preflight code or a branded error after admission cannot bypass owned retirement', async t => {
+  for (const kind of ['forged-preflight', 'forged-execution', 'branded-after-admission']) {
+    await t.test(kind, async () => {
+      const calls = [];
+      const closes = [];
+      const failure = kind === 'branded-after-admission'
+        ? preAdmissionRefusal('fixture admitted failure')
+        : Object.assign(new Error('fixture admitted failure'), { code: 'unsupported_action', responses: [] });
+      const lane = new TargetLane({}, async () => ({
+        preflight() { if (kind === 'forged-preflight') throw failure; },
+        async execute(actions) { calls.push(...actions); throw failure; },
+        async close(options) { closes.push(options); },
+      }));
+      lane.acquire('owner');
+      try {
+        await assert.rejects(lane.execute([{ action: 'wait' }]), /fixture admitted failure/);
+        assert.equal(calls.length, kind === 'forged-preflight' ? 0 : 1);
+        assert.equal(closes.length, 1);
+        assert.equal(lane.releasing, true);
+        await assert.rejects(lane.execute([{ action: 'health' }]), /releasing/);
+      } finally { await lane.close(); }
+    });
+  }
+});
+
+test('a broker-wire capability refusal retains ownership instead of automatically releasing the healthy executor', async () => {
+  const { directory, socketPath } = await fixture();
+  const calls = [];
+  const closes = [];
+  let spawns = 0;
+  const capabilities = nativeCapabilities(['health', 'wait']);
+  const broker = await createBroker({ socketPath, config: { targets: { desktop: {} } }, factory: async () => {
+    spawns++;
+    return {
+      preflight(actions) { requireNativeActions(actions, capabilities); },
+      async execute(actions) { calls.push(...actions); return actions.map(() => ({ result: { detail: 'OK' } })); },
+      async close(options) { closes.push(options); },
+    };
+  } });
+  const first = new BrokerExecutor({ socketPath, target: 'desktop' });
+  const another = new BrokerExecutor({ socketPath, target: 'desktop' });
+  try {
+    await Promise.all([first.opened, another.opened]);
+    await assert.rejects(first.execute([{ action: 'detect_elements' }]), /Action unavailable/);
+    await assert.rejects(another.execute([{ action: 'health' }]), /another session/);
+    await first.execute([{ action: 'health' }]);
+    assert.deepEqual(calls, [{ action: 'health' }]);
+    assert.equal(spawns, 1);
+    assert.deepEqual(closes, []);
+    await first.release();
+    await another.execute([{ action: 'health' }]);
+    assert.equal(spawns, 2);
+  } finally {
+    await first.close(); await another.close(); await broker.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('a protocol refusal stops later coalesced broker commands before dispatch', async () => {
   const { directory, socketPath } = await fixture();

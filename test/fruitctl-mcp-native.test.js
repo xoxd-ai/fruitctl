@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { createNativeExecutor } from '../index.js';
+import { nativeCapabilities, isPreAdmissionRefusal, preAdmissionRefusal } from '../lib/mcp/capabilities.js';
 
 const source = `
 const fs = require('node:fs');
@@ -16,7 +17,16 @@ async function main() {
   if(credential.readUInt32BE(0)!==credential.length-4 || Object.hasOwn(process.env,'VNC_PASSWORD')) process.exit(70);
   credential.fill(0);
   if(process.env.FRUITCTL_FIXTURE_MODE==='diagnostics') process.stderr.write('owned-fixture-raw-diagnostic\\n');
-  emit({method:'ready',params:{scaledWidth:1280,scaledHeight:640}});
+  const capabilityModes = {
+    capabilities: ['health','wait','shutdown'],
+    'empty-capabilities': [],
+    'duplicate-capabilities': ['health','health'],
+    'oversized-capabilities': Array.from({length:65}, (_,i)=>'action_'+i),
+    'invalid-capabilities': ['health','private description\\n'],
+  };
+  const capabilities=capabilityModes[process.env.FRUITCTL_FIXTURE_MODE];
+  emit({method:'ready',params:{scaledWidth:1280,scaledHeight:640,
+    ...(capabilities===undefined?{}:{capabilities})}});
   for await (const line of readline.createInterface({input:process.stdin})) {
     const request=JSON.parse(line); received.push(request.method);
     if(request.method==='shutdown') {
@@ -74,12 +84,13 @@ async function fixture(t, mode = 'normal', options = {}) {
   fs.writeFileSync(file, `#!${process.execPath}\n${source}`, { mode: 0o700, flag: 'wx' });
   const log = [];
   const env = { VNC_PASSWORD: 'owned-offline-fixture', FRUITCTL_FIXTURE_MODE: mode };
-  const executor = await createNativeExecutor({ ...options, env, daemonPath: file, log: (message) => log.push(message) });
+  let executor;
   t.after(async () => {
-    await executor.close();
+    if (executor) await executor.close();
     fs.unlinkSync(file);
     fs.rmdirSync(directory);
   });
+  executor = await createNativeExecutor({ ...options, env, daemonPath: file, log: (message) => log.push(message) });
   assert.equal(Object.hasOwn(env, 'VNC_PASSWORD'), false);
   return { executor, log };
 }
@@ -247,4 +258,61 @@ test('native batch/deadline bounds refuse malformed work before sending commands
     await assert.rejects(executor.execute([{ action: 'wait' }], { timeoutMs }), /Invalid native tool deadline/);
   }
   assert.deepEqual(JSON.parse((await executor.execute([{ action: 'health' }]))[0].result.detail), ['health']);
+});
+
+test('native capability discovery is additive and leaves missing legacy metadata explicitly unknown', async (t) => {
+  const { executor } = await fixture(t);
+  assert.deepEqual(executor.capabilities, { known: false, actions: [] });
+  const [response] = await executor.execute([{ action: 'health' }]);
+  assert.deepEqual(response.result.capabilities, { known: false, actions: [] });
+  await executor.execute([{ action: 'key_tap', key: 'tab' }]);
+  assert.deepEqual(JSON.parse((await executor.execute([{ action: 'health' }]))[0].result.detail),
+    ['health', 'key_tap', 'health']);
+});
+
+test('known unsupported and mixed native batches refuse before any write without retiring compatible work', async (t) => {
+  const { executor } = await fixture(t, 'capabilities');
+  assert.deepEqual(executor.capabilities, { known: true, actions: ['health', 'wait', 'shutdown'] });
+  assert.equal(Object.isFrozen(executor.capabilities), true);
+  assert.equal(Object.isFrozen(executor.capabilities.actions), true);
+  for (const actions of [[{ action: 'key_tap', key: 'tab' }],
+    [{ action: 'wait' }, { action: 'key_tap', key: 'tab' }]]) {
+    await assert.rejects(executor.execute(actions), error => {
+      assert.equal(isPreAdmissionRefusal(error), true);
+      assert.equal(error.code, 'unsupported_action');
+      assert.deepEqual(error.responses, []);
+      return true;
+    });
+  }
+  await assert.rejects(executor.inputPermitControl('begin_input_permit', {}), /Action unavailable/);
+  assert.deepEqual(JSON.parse((await executor.execute([{ action: 'health' }]))[0].result.detail), ['health']);
+  assert.equal(executor.isReady, true);
+  assert.equal(executor.child.signalCode, null);
+  const [response] = await executor.execute([{ action: 'health' }]);
+  assert.deepEqual(response.result.capabilities, executor.capabilities);
+});
+
+test('an explicitly empty native capability set is known unavailable rather than legacy unknown', async (t) => {
+  const { executor } = await fixture(t, 'empty-capabilities');
+  assert.deepEqual(executor.capabilities, { known: true, actions: [] });
+  await assert.rejects(executor.execute([{ action: 'health' }]), /Action unavailable/);
+  await executor.close({ graceful: false });
+});
+
+test('malformed native capability advertisements fail startup without exposing remote values', async (t) => {
+  for (const mode of ['duplicate-capabilities', 'oversized-capabilities', 'invalid-capabilities']) {
+    await t.test(mode, async t => {
+      await assert.rejects(fixture(t, mode), /Invalid native capability metadata/);
+    });
+  }
+});
+
+test('capability bounds reject non-array data and a forged refusal never carries the local brand', () => {
+  for (const value of [null, 'health', {}, [1], ['Health'], [''], ['a'.repeat(65)]]) {
+    assert.throws(() => nativeCapabilities(value), /Invalid native capability metadata/);
+  }
+  const refusal = preAdmissionRefusal('bounded refusal');
+  assert.equal(isPreAdmissionRefusal(refusal), true);
+  assert.equal(isPreAdmissionRefusal(Object.assign(new Error(refusal.message), refusal)), false);
+  assert.equal(isPreAdmissionRefusal(JSON.parse(JSON.stringify(refusal))), false);
 });

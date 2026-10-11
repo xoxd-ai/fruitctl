@@ -49,6 +49,7 @@ struct PCResponse: Encodable {
         var input_permit_ms: Int?
         var maximum_round_trip_ms: Int?
         var native_permit_remaining_ms: Int?
+        var capabilities: [String]?
     }
 
     struct ErrorPayload: Encodable {
@@ -66,7 +67,8 @@ struct PCResponse: Encodable {
         scaledHeight: Int? = nil,
         timing: [String: Double]? = nil,
         elements: [TextElement]? = nil,
-        frameContext: VNCInputContext? = nil
+        frameContext: VNCInputContext? = nil,
+        capabilities: [String]? = nil
     ) -> PCResponse {
         PCResponse(
             result: ResultPayload(
@@ -75,7 +77,7 @@ struct PCResponse: Encodable {
                 timing: timing, elements: elements,
                 nativeWidth: frameContext?.width, nativeHeight: frameContext?.height,
                 connectionGeneration: frameContext?.connectionGeneration,
-                allocation: frameContext?.allocation
+                allocation: frameContext?.allocation, capabilities: capabilities
             ),
             error: nil, id: id
         )
@@ -112,6 +114,7 @@ enum PCValue: Encodable {
     case string(String)
     case int(Int)
     case bool(Bool)
+    case strings([String])
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
@@ -119,6 +122,7 @@ enum PCValue: Encodable {
         case .string(let s): try container.encode(s)
         case .int(let n): try container.encode(n)
         case .bool(let b): try container.encode(b)
+        case .strings(let values): try container.encode(values)
         }
     }
 }

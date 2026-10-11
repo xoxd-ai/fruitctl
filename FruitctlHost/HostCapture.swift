@@ -2,6 +2,7 @@ import AppKit
 import ScreenCaptureKit
 import CoreGraphics
 import CoreVideo
+import CoreMedia
 import Darwin
 import ImageIO
 import UniformTypeIdentifiers
@@ -16,6 +17,7 @@ struct HostCapturedImage {
     let bounds: CGRect
     let excludedPID: pid_t
     let excludedBundleID: String
+    let nativeFrameTiming: HostNativeFrameTiming
 
     var geometryMetadata: [String: HostValue] {
         ["mimeType": .string("image/png"),
@@ -31,7 +33,8 @@ struct HostCapturedImage {
          "native_capture_resolution": .string("best"),
          "native_pixel_format": .string("BGRA32"),
          "excluded_application_pid": .integer(Int64(excludedPID)),
-         "excluded_application_bundle_id": .string(excludedBundleID)]
+         "excluded_application_bundle_id": .string(excludedBundleID),
+         "native_frame_timing": nativeFrameTiming.metadata]
     }
 
     var metadata: [String: HostValue] {
@@ -88,16 +91,26 @@ final class HostCapture {
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
         configuration.scalesToFit = false
         configuration.captureResolution = .best
-        let image: CGImage
+        let sampled: (CMSampleBuffer, CMTime, CMTime)
         do {
-            image = try await permission.withCaptureAuthorization(enabled: { self.enabled }) {
-                try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+            sampled = try await permission.withCaptureAuthorization(enabled: { self.enabled }) {
+                try Task.checkCancellation()
+                let hostClock = CMClockGetHostTimeClock()
+                let requestedAt = CMClockGetTime(hostClock)
+                let sample = try await SCScreenshotManager.captureSampleBuffer(contentFilter: filter,
+                                                                             configuration: configuration)
+                let completedAt = CMClockGetTime(hostClock)
+                try Task.checkCancellation()
+                return (sample, requestedAt, completedAt)
             }
         } catch let error as HostCaptureError { throw error }
         catch {
             throw HostCaptureFailure.preserving(error, phase: .captureImage,
                                               screenCaptureErrorDomain: SCStreamErrorDomain)
         }
+        let captured = try HostCapturedSample.read(sampled.0, width: width, height: height,
+            requestHostTime: sampled.1, completionHostTime: sampled.2)
+        let image = captured.image
         guard image.width == width, image.height == height,
               CGDisplayBounds(displayID) == bounds,
               CGDisplayPixelsWide(displayID) == width, CGDisplayPixelsHigh(displayID) == height else {
@@ -124,9 +137,11 @@ final class HostCapture {
         else { throw HostCaptureError.imageEncodingFailed }
         CGImageDestinationAddImage(encoder, output, nil)
         guard CGImageDestinationFinalize(encoder) else { throw HostCaptureError.imageEncodingFailed }
+        try Task.checkCancellation()
         return HostCapturedImage(png: png as Data, nativeWidth: width, nativeHeight: height,
             scaledWidth: scaledWidth, scaledHeight: scaledHeight, displayID: displayID, bounds: bounds,
-            excludedPID: ownApp.processID, excludedBundleID: ownApp.bundleIdentifier)
+            excludedPID: ownApp.processID, excludedBundleID: ownApp.bundleIdentifier,
+            nativeFrameTiming: captured.timing)
     }
 }
 

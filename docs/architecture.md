@@ -174,6 +174,25 @@ input remains on the VNC client and requires a measured mapping between those
 observations and the VNC desktop. Until the installed path has an exclusion and
 mapping receipt, treat it as an unqualified preview.
 
+Current Host source obtains one `CMSampleBuffer` from
+`SCScreenshotManager.captureSampleBuffer`, copies its bounded BGRA pixels into
+owned storage and encodes the PNG from that copy. The accompanying
+`native_frame_timing` metadata retains that sample's presentation time, optional
+WindowServer display time, and separate request/completion brackets from the
+CoreMedia host clock. Integer timestamp values and epochs are decimal strings
+so JSON consumers can preserve their precision.
+
+These fields support capture qualification; they do not establish frame
+freshness. Metadata explicitly reports `freshness: unknown`, an unverified
+native-to-host clock relation and unverified WindowServer display-time units.
+RPC completion time is not the acquisition time, and the CoreMedia host clock
+must not be equated with the Host's process-relative `ContinuousClock` Stop
+diagnostics. A separate pure
+classifier can reject stale, future or nonadvancing samples only after a
+qualification establishes the actual clock relation. Ordinary static capture
+does not use that classifier. This source change supplies no signed Host
+release or physical capture acceptance.
+
 ## Compatibility and release boundary
 
 Keep legacy executable aliases and the compatible signed application identity

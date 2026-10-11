@@ -8,6 +8,31 @@ final class NativeBehaviorTests: XCTestCase {
             from: Data("{\"method\":\"\(method)\",\"params\":\(params),\"id\":1}".utf8))
     }
 
+    func testReadyAndHealthAddTheSameBoundedCapabilitiesWithoutChangingLegacyPayloads() throws {
+        let methods = PCRequest.supportedMethods
+        XCTAssertLessThanOrEqual(methods.count, 64)
+        XCTAssertEqual(Set(methods).count, methods.count)
+        XCTAssertTrue(PCRequest.inputMethods.isSubset(of: Set(methods)))
+        XCTAssertTrue(PCRequest.inputPermitMethods.isSubset(of: Set(methods)))
+        let ready = PCNotification(method: "ready", params: [
+            "scaledWidth": .int(1280), "scaledHeight": .int(720), "capabilities": .strings(methods),
+        ])
+        let readyJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(ready)) as? [String: Any])
+        let params = try XCTUnwrap(readyJSON["params"] as? [String: Any])
+        let health = PCResponse.success(id: .number(1), detail: "connected", scaledWidth: 1280,
+                                        scaledHeight: 720, capabilities: methods)
+        let healthJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(health)) as? [String: Any])
+        let result = try XCTUnwrap(healthJSON["result"] as? [String: Any])
+        XCTAssertEqual(params["capabilities"] as? [String], methods)
+        XCTAssertEqual(result["capabilities"] as? [String], methods)
+        XCTAssertEqual(result["detail"] as? String, "connected")
+        let legacy = PCResponse.success(id: .number(2), detail: "OK")
+        let legacyJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(legacy)) as? [String: Any])
+        let legacyResult = try XCTUnwrap(legacyJSON["result"] as? [String: Any])
+        XCTAssertNil(legacyResult["capabilities"])
+        XCTAssertEqual(legacyResult["detail"] as? String, "OK")
+    }
+
     func testEncodedGeometryMatchesMappingForOddAspectRatio() throws {
         let scaling = DisplayScaling(nativeWidth: 1920, nativeHeight: 1081)
         let pixels = Data(repeating: 127, count: 1920 * 1081 * 4)

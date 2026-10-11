@@ -13,6 +13,7 @@ import { createBroker, TargetLane } from '../lib/broker/server.mjs';
 import { BrokerExecutor } from '../lib/broker/client.mjs';
 import { McpSession } from '../lib/mcp/server.js';
 import { ResponseBudget } from '../lib/mcp/protocol.js';
+import { nativeCapabilities, isPreAdmissionRefusal } from '../lib/mcp/capabilities.js';
 
 function crc32(bytes) {
   let crc = 0xffffffff;
@@ -45,8 +46,9 @@ const mapping = { qualificationReceipt: 'test-fixture:explicit-geometry-proof', 
 const configuration = () => ({ sshHost: 'configured-target',
   command: ['/Applications/FruitctlHost.app/Contents/MacOS/FruitctlHost', '--stdio'], displayId: 42 });
 
-function native({ health = {}, run, releaseError, releaseRun, adopt } = {}) {
+function native({ health = {}, run, releaseError, releaseRun, adopt, capabilities } = {}) {
   return {
+    capabilities: nativeCapabilities(capabilities),
     display: { width: 256, height: 128 }, calls: [], closes: [], releases: [], permitControls: [],
     async inputPermitControl(method, params) {
       this.permitControls.push({ method, params });
@@ -173,7 +175,7 @@ test('unconfirmed retirement never appends an untrusted executor message', async
 test('diagnosed begin and capture refusals retain local correlation and prevent successor input', async t => {
   for (const action of ['begin_activity', 'capture']) {
     await t.test(action, async () => {
-      const { executor, vnc, host } = await fixture({ helperOptions: { alter(request, response) {
+      const { executor, vnc, host } = await fixture({ config: { ...configuration(), mapping }, helperOptions: { alter(request, response) {
         return request.action === action ? refused(request, 'capture_failed', captureDiagnostic()) : response;
       } } });
       try {
@@ -260,7 +262,7 @@ test('malformed optional diagnostics never reflect descriptions, paths or arbitr
   ];
   for (const [index, data] of cases.entries()) {
     await t.test(String(index), async () => {
-      const { executor, vnc, host } = await fixture({ helperOptions: { alter(request, response) {
+      const { executor, vnc, host } = await fixture({ config: { ...configuration(), mapping }, helperOptions: { alter(request, response) {
         return request.action === 'begin_activity' ? refused(request, 'capture_failed', data) : response;
       } } });
       try {
@@ -336,7 +338,7 @@ test('broker keeps release-unconfirmed and sanitized capture cause with partial 
       const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'fruitctl-host-diagnostic-'));
       await fs.chmod(directory, 0o700);
       t.after(() => fs.rm(directory, { recursive: true, force: true }));
-      const { executor, vnc, host } = await fixture({ helperOptions: { alter(request, response) {
+      const { executor, vnc, host } = await fixture({ config: { ...configuration(), mapping }, helperOptions: { alter(request, response) {
         return request.action === 'capture' ? refused(request, 'capture_failed', captureDiagnostic()) : response;
       } } });
       const socketPath = path.join(directory, 'broker.sock');
@@ -401,14 +403,23 @@ test('helper transport only executes configured SSH stdio attachment and forward
   } finally { await executor.close(); }
 });
 
-test('unqualified mapping refuses input and closes only the owned native executor', async () => {
+test('unqualified mapping refuses the entire batch before activity and retains healthy observations', async () => {
   const { executor, vnc, host } = await fixture();
-  await assert.rejects(executor.execute([{ action: 'mouse_click', x: 1, y: 1 }]), /not qualified/);
-  assert.deepEqual(vnc.calls, []);
-  assert.deepEqual(vnc.closes, [{ graceful: false }]);
-  assert.deepEqual(host.child.kills, ['SIGTERM']);
-  await assert.rejects(executor.execute([{ action: 'mouse_click', x: 1, y: 1 }]), /not qualified/);
-  assert.equal(vnc.closes.length, 1);
+  try {
+    await assert.rejects(executor.execute([{ action: 'screenshot' },
+      { action: 'mouse_click', x: 1, y: 1 }]), error => {
+      assert.match(error.message, /not qualified/);
+      assert.equal(isPreAdmissionRefusal(error), true);
+      assert.deepEqual(error.responses, []);
+      return true;
+    });
+    assert.deepEqual(vnc.calls, []);
+    assert.deepEqual(vnc.closes, []);
+    assert.deepEqual(host.child.kills, []);
+    assert.deepEqual(host.requests.map(request => request.action), ['health']);
+    await executor.execute([{ action: 'screenshot' }]);
+    assert.equal(host.state().overlay_ready, true);
+  } finally { await executor.close(); }
 });
 
 test('qualified exact geometry renews a permit before native input and never replays it', async () => {
@@ -567,10 +578,70 @@ test('oversized action count is rejected without acquiring activity or issuing i
 });
 
 test('raw VNC-derived OCR/diff/crop actions fail explicitly with helper capture configured', async () => {
-  const { executor, vnc } = await fixture();
-  await assert.rejects(executor.execute([{ action: 'detect_elements' }]), /Action unavailable/);
-  assert.deepEqual(vnc.calls, []);
-  assert.equal(vnc.closes.length, 1);
+  const { executor, vnc, host } = await fixture();
+  try {
+    for (const action of ['detect_elements', 'cursor_crop', 'diff_check', 'set_baseline',
+      'configure', 'get_timing', 'shutdown']) {
+      await assert.rejects(executor.execute([{ action }]), /Action unavailable/);
+    }
+    await assert.rejects(executor.execute([{ action: 'wait' }, { action: 'detect_elements' }]),
+      /Action unavailable/);
+    assert.deepEqual(vnc.calls, []);
+    assert.equal(vnc.closes.length, 0);
+    assert.deepEqual(host.child.kills, []);
+    assert.deepEqual(host.requests.map(request => request.action), ['health']);
+    await executor.execute([{ action: 'screenshot' }]);
+    assert.equal(host.state().overlay_ready, true);
+  } finally { await executor.close(); }
+});
+
+test('helper health discovers bounded routes without acquiring activity and preserves unknown legacy native metadata', async () => {
+  const { executor, vnc, host } = await fixture();
+  try {
+    const [response] = await executor.execute([{ action: 'health' }]);
+    assert.deepEqual(response.result.capabilities, { backend: 'owned_sck', known: false,
+      actions: ['screenshot', 'health', 'wait'], native: { known: false, actions: [] },
+      inputMappingQualified: false });
+    assert.deepEqual(vnc.calls, [{ action: 'health' }]);
+    assert.deepEqual(host.requests.map(request => request.action), ['health']);
+    assert.equal(host.state().overlay_ready, false);
+    assert.equal(vnc.closes.length, 0);
+    await executor.execute([{ action: 'wait' }]);
+    assert.equal(host.state().overlay_ready, true);
+  } finally { await executor.close(); }
+});
+
+test('known missing native adoption support refuses mapped input before helper begin or native writes', async () => {
+  const { executor, vnc, host } = await fixture({ config: { ...configuration(), mapping },
+    nativeOptions: { capabilities: ['health', 'wait', 'mouse_click'] } });
+  try {
+    assert.equal(executor.capabilities.known, true);
+    assert.equal(executor.capabilities.actions.includes('mouse_click'), false);
+    await assert.rejects(executor.execute([{ action: 'mouse_click', x: 1, y: 1 }]),
+      /Action unavailable on native backend/);
+    assert.deepEqual(vnc.calls, []);
+    assert.deepEqual(vnc.permitControls, []);
+    assert.deepEqual(host.requests.map(request => request.action), ['health']);
+    assert.equal(vnc.closes.length, 0);
+    await executor.execute([{ action: 'screenshot' }]);
+    assert.equal(host.state().overlay_ready, true);
+  } finally { await executor.close(); }
+});
+
+test('unsupported batch preserves an existing admitted helper lease until explicit release', async () => {
+  const { executor, vnc, host } = await fixture();
+  try {
+    await executor.execute([{ action: 'screenshot' }]);
+    const owner = host.state().session_id;
+    const before = host.requests.length;
+    await assert.rejects(executor.execute([{ action: 'detect_elements' }]), /Action unavailable/);
+    assert.equal(host.requests.length, before);
+    assert.equal(host.state().session_id, owner);
+    assert.equal(host.state().overlay_ready, true);
+    assert.equal(vnc.closes.length, 0);
+    await executor.release();
+    assert.equal(host.state().overlay_ready, false);
+  } finally { await executor.close(); }
 });
 
 test('default wait remains compatible without introducing a raw pixel path', async () => {

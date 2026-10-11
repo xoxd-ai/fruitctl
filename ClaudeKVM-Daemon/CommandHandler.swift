@@ -331,7 +331,7 @@ extension ClaudeKVMDaemon {
                                                  maxDimension: scaling.maxDimension)
                 respond(.success(id: id, detail: "\(vnc.connectionState)",
                                   scaledWidth: liveScaling.scaledWidth, scaledHeight: liveScaling.scaledHeight,
-                                  frameContext: current))
+                                  frameContext: current, capabilities: PCRequest.supportedMethods))
 
             case "shutdown":
                 input.inputPermit.stopWatchdog()

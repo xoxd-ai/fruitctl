@@ -3,6 +3,14 @@ import Foundation
 /// PC (Procedure Call) request over stdin NDJSON.
 /// {"method":"mouse_click","params":{"x":640,"y":480},"id":1}
 struct PCRequest: Decodable {
+    // Additive ready/health metadata. These names match ordinary dispatch and
+    // the two private permit controls; they do not assert desktop qualification.
+    static let supportedMethods = [
+        "screenshot", "cursor_crop", "diff_check", "set_baseline", "detect_elements",
+        "mouse_move", "hover", "nudge", "mouse_click", "mouse_double_click", "mouse_drag", "scroll",
+        "key_tap", "key_combo", "key_type", "paste", "configure", "get_timing", "wait", "health", "shutdown",
+        "adopt_observation", "begin_input_permit", "grant_input_permit",
+    ]
     let method: String
     let params: Params?
     let id: PCId?

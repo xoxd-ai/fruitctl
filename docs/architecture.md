@@ -31,6 +31,23 @@ or bridge loss; late closure cannot revise that result or replay input. This
 source repair is newer than immutable alpha.7 and is not installed-runtime or
 Home Manager delivery qualification.
 
+## Backend capabilities
+
+Current source advertises a bounded native action list at readiness and includes
+`capabilities: { known, actions }` in MCP health results. Missing metadata from an
+older controller remains `known: false`; its existing compatible actions still
+work. An explicitly empty native list advertises no supported native actions.
+Capabilities describe supported routes, not desktop, permission or input-mapping
+qualification. The experimental helper reports its wrapper routes separately
+from the native list and requires qualified mapping for input.
+
+Known unsupported actions reject the whole batch before action writes or helper
+activity acquisition. A healthy owner's lease and queued compatible work remain
+available. Discovering capabilities can start the configured backend; this does
+not promise zero initial startup. Failures after admission still retire uncertain
+execution, and remote or forged refusal codes cannot bypass cleanup. These source
+changes are newer than immutable alpha.7.
+
 ## Session and credential ownership
 
 One broker owns each target's live control state. The operator selects a named
@@ -58,8 +75,8 @@ idle cleanup deadline.
 Reconnect requires a new observation and cannot replay previous input. The
 optional target app has its own short-lived indicator lease and local stop
 control. In the experimental helper path, the executor starts target activity
-on the task's first execute request and renews it every 500 milliseconds across
-requests and agent thinking gaps. It ends activity on explicit task release,
+on the task's first admitted non-health request and renews it every 500
+milliseconds across requests and agent thinking gaps. It ends activity on explicit task release,
 completion, failure, disconnect, or the broker's 60-second ownership expiry.
 Input requires a current ready acknowledgement and independently
 qualified mapping. The helper-backed source additionally binds each permit to

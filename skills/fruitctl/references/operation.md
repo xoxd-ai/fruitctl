@@ -7,6 +7,12 @@ Use the discovered `vnc_command` schema. Its coordinates are in the displayed
 {"action":"health"}
 ```
 
+When health includes `capabilities` with `known: true`, use its `actions` list
+to avoid unavailable routes. `known: false` or missing metadata means support is
+unknown on an older backend; use its compatible existing actions without assuming
+new features. An empty list with `known: true` advertises no supported actions.
+An advertisement does not qualify permissions, capture or input mapping.
+
 ```json
 {"action":"screenshot"}
 ```

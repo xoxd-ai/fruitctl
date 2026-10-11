@@ -1,5 +1,10 @@
 import Foundation
 import XCTest
+import CoreMedia
+import CoreVideo
+import CoreGraphics
+import ScreenCaptureKit
+import Darwin
 
 final class FruitctlHostTests: XCTestCase {
     private let owner = UUID()
@@ -498,5 +503,249 @@ final class FruitctlHostTests: XCTestCase {
         var unterminated = HostLineFramer()
         _ = try unterminated.append(Data(#"{"action":"health"}"#.utf8))
         XCTAssertTrue(unterminated.hasIncompleteLine)
+    }
+}
+
+/// These tests create tiny in-memory samples. They do not call the screenshot
+/// API, open a desktop or establish the clock mapping of a real SCK sample.
+final class HostNativeCaptureTimingTests: XCTestCase {
+    private func time(_ value: Int64, scale: Int32 = 1_000, epoch: Int64 = 0) -> CMTime {
+        CMTime(value: value, timescale: scale, flags: .valid, epoch: epoch)
+    }
+
+    private func makeSample(presentation: CMTime? = nil, blue: UInt8 = 0, red: UInt8 = 255,
+                            format: OSType = kCVPixelFormatType_32BGRA, ready: Bool = true,
+                            status: Any? = SCFrameStatus.complete.rawValue,
+                            displayTime: Any? = UInt64(9_007_199_254_740_993)) throws -> CMSampleBuffer {
+        var pixelBuffer: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 2, 1, format, nil, &pixelBuffer), kCVReturnSuccess)
+        let buffer = try XCTUnwrap(pixelBuffer)
+        XCTAssertEqual(CVPixelBufferLockBaseAddress(buffer, []), kCVReturnSuccess)
+        if let bytes = CVPixelBufferGetBaseAddress(buffer)?.assumingMemoryBound(to: UInt8.self) {
+            for pixel in 0..<2 {
+                bytes[pixel * 4] = blue; bytes[pixel * 4 + 1] = 0
+                bytes[pixel * 4 + 2] = red; bytes[pixel * 4 + 3] = 255
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+        var description: CMVideoFormatDescription?
+        XCTAssertEqual(CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault,
+            imageBuffer: buffer, formatDescriptionOut: &description), noErr)
+        var timing = CMSampleTimingInfo(duration: .invalid,
+            presentationTimeStamp: presentation ?? time(105), decodeTimeStamp: .invalid)
+        var sample: CMSampleBuffer?
+        XCTAssertEqual(CMSampleBufferCreateForImageBuffer(allocator: kCFAllocatorDefault,
+            imageBuffer: buffer, dataReady: ready, makeDataReadyCallback: nil, refcon: nil,
+            formatDescription: try XCTUnwrap(description), sampleTiming: &timing,
+            sampleBufferOut: &sample), noErr)
+        let result = try XCTUnwrap(sample)
+        if status != nil || displayTime != nil {
+            let array = try XCTUnwrap(CMSampleBufferGetSampleAttachmentsArray(result,
+                createIfNecessary: true) as? [NSMutableDictionary])
+            let attachments = try XCTUnwrap(array.first)
+            if let status { attachments[SCStreamFrameInfo.status.rawValue] = status }
+            if let displayTime { attachments[SCStreamFrameInfo.displayTime.rawValue] = displayTime }
+        }
+        return result
+    }
+
+    private func read(_ sample: CMSampleBuffer, width: Int = 2, height: Int = 1) throws -> HostCapturedSample {
+        try HostCapturedSample.read(sample, width: width, height: height,
+                                    requestHostTime: time(100), completionHostTime: time(110))
+    }
+
+    private func rgba(_ image: CGImage) throws -> [UInt8] {
+        let context = try XCTUnwrap(CGContext(data: nil, width: image.width, height: image.height,
+            bitsPerComponent: 8, bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue))
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        let bytes = try XCTUnwrap(context.data).assumingMemoryBound(to: UInt8.self)
+        return Array(UnsafeBufferPointer(start: bytes, count: image.width * image.height * 4))
+    }
+
+    private func timing(presentation: CMTime? = nil, request: CMTime? = nil,
+                        completion: CMTime? = nil, complete: Bool? = true) -> HostNativeFrameTiming {
+        HostNativeFrameTiming(presentationTime: presentation ?? time(105),
+            requestHostTime: request ?? time(100), completionHostTime: completion ?? time(110),
+            frameComplete: complete, windowServerDisplayTime: nil)
+    }
+
+    func testPixelsAndPresentationTimeComeFromTheSameReturnedSample() throws {
+        let red = try read(makeSample(presentation: time(103)))
+        let blue = try read(makeSample(presentation: time(107), blue: 255, red: 0))
+        XCTAssertEqual(try rgba(red.image), [255, 0, 0, 255, 255, 0, 0, 255])
+        XCTAssertEqual(try rgba(blue.image), [0, 0, 255, 255, 0, 0, 255, 255])
+        XCTAssertEqual(CMTimeCompare(red.timing.presentationTime, time(103)), 0)
+        XCTAssertEqual(CMTimeCompare(blue.timing.presentationTime, time(107)), 0)
+        XCTAssertNotEqual(CMTimeCompare(red.timing.presentationTime, blue.timing.presentationTime), 0)
+        XCTAssertEqual(red.timing.windowServerDisplayTime, 9_007_199_254_740_993)
+    }
+
+    func testReusedSourceSurfaceCannotChangeTheReturnedImage() throws {
+        let sample = try makeSample()
+        let captured = try read(sample)
+        let before = try rgba(captured.image)
+        let source = try XCTUnwrap(CMSampleBufferGetImageBuffer(sample))
+        XCTAssertEqual(CVPixelBufferLockBaseAddress(source, []), kCVReturnSuccess)
+        if let bytes = CVPixelBufferGetBaseAddress(source) {
+            memset(bytes, 0, CVPixelBufferGetBytesPerRow(source))
+        }
+        CVPixelBufferUnlockBaseAddress(source, [])
+        XCTAssertEqual(try rgba(captured.image), before)
+        XCTAssertEqual(before, [255, 0, 0, 255, 255, 0, 0, 255])
+    }
+
+    func testInvalidOrNotReadySampleCannotProduceAnImage() throws {
+        let invalid = try makeSample()
+        XCTAssertEqual(CMSampleBufferInvalidate(invalid), noErr)
+        for sample in [invalid, try makeSample(ready: false)] {
+            XCTAssertThrowsError(try read(sample)) {
+                XCTAssertEqual($0 as? HostCaptureError, .incompleteImage)
+            }
+        }
+    }
+
+    func testPartialGeometryWrongPixelFormatAndAllocationBoundsAreRejected() throws {
+        let sample = try makeSample()
+        for size in [(1, 1), (2, 2), (0, 1), (16_385, 1), (16_384, 16_384), (Int.max, Int.max)] {
+            XCTAssertThrowsError(try read(sample, width: size.0, height: size.1)) {
+                XCTAssertEqual($0 as? HostCaptureError, .incompleteImage)
+            }
+        }
+        XCTAssertThrowsError(try read(makeSample(format: kCVPixelFormatType_32ARGB))) {
+            XCTAssertEqual($0 as? HostCaptureError, .incompleteImage)
+        }
+    }
+
+    func testExplicitIncompleteAndMalformedFrameStatusAreRejected() throws {
+        let statuses: [Any] = [SCFrameStatus.idle.rawValue, SCFrameStatus.blank.rawValue,
+                               999, NSNumber(value: false), "0"]
+        for status in statuses {
+            XCTAssertThrowsError(try read(makeSample(status: status))) {
+                XCTAssertEqual($0 as? HostCaptureError, .incompleteImage)
+            }
+        }
+    }
+
+    func testMissingTimingAttachmentsDoNotBreakStaticCaptureOrInventFreshness() throws {
+        let captured = try read(makeSample(status: nil, displayTime: nil))
+        XCTAssertEqual(try rgba(captured.image), [255, 0, 0, 255, 255, 0, 0, 255])
+        XCTAssertNil(captured.timing.frameComplete)
+        XCTAssertNil(captured.timing.windowServerDisplayTime)
+        XCTAssertEqual(captured.timing.qualificationRefusal(clockRelation: .verifiedCoreMediaHostTime),
+                       .frameStatusUnavailable)
+    }
+
+    func testMalformedDisplayTimeRemainsUnknownInsteadOfBecomingZeroOrNow() throws {
+        let values: [Any] = [NSNumber(value: true), NSNumber(value: -1), NSNumber(value: 1.5), "123"]
+        for raw in values {
+            let captured = try read(makeSample(displayTime: raw))
+            XCTAssertNil(captured.timing.windowServerDisplayTime)
+            XCTAssertEqual(captured.timing.frameComplete, true)
+        }
+    }
+
+    func testTimestampMetadataPreservesIntegersAboveJavaScriptPrecision() throws {
+        let native = HostNativeFrameTiming(presentationTime: time(Int64.max, scale: 1, epoch: Int64.max),
+            requestHostTime: time(100), completionHostTime: time(110), frameComplete: true,
+            windowServerDisplayTime: UInt64.max)
+        let request = try JSONDecoder().decode(HostRequest.self, from: Data(#"{"action":"capture","id":"timing-1"}"#.utf8))
+        let line = try HostResponse.ok(request, ["native_frame_timing": native.metadata]).line()
+        let response = try XCTUnwrap(JSONSerialization.jsonObject(with: line) as? [String: Any])
+        let result = try XCTUnwrap(response["result"] as? [String: Any])
+        let metadata = try XCTUnwrap(result["native_frame_timing"] as? [String: Any])
+        let pts = try XCTUnwrap(metadata["presentation_time"] as? [String: Any])
+        XCTAssertEqual(pts["value"] as? String, String(Int64.max))
+        XCTAssertEqual(pts["epoch"] as? String, String(Int64.max))
+        XCTAssertEqual(metadata["window_server_display_time"] as? String, String(UInt64.max))
+        XCTAssertEqual(metadata["native_time_semantics"] as? String, "sample_presentation_time")
+        XCTAssertEqual(metadata["native_to_host_clock_relation"] as? String, "unverified")
+        XCTAssertEqual(metadata["window_server_display_time_units"] as? String, "unverified")
+        XCTAssertEqual(metadata["freshness"] as? String, "unknown")
+    }
+
+    func testInvalidNativeTimeCannotBeRepairedByValidRequestBrackets() {
+        for value in [CMTime.invalid, .indefinite, .positiveInfinity, .negativeInfinity,
+                      time(-1), CMTime(value: 1, timescale: 0, flags: .valid, epoch: 0)] {
+            let native = timing(presentation: value)
+            XCTAssertFalse(HostNativeFrameTiming.usable(native.presentationTime))
+            XCTAssertEqual(native.qualificationRefusal(clockRelation: .verifiedCoreMediaHostTime),
+                           .presentationTimeUnavailable)
+        }
+    }
+
+    func testNumericTimestampProximityDoesNotEstablishClockMapping() {
+        let native = timing()
+        XCTAssertTrue(native.hasValidHostBracket)
+        XCTAssertEqual(native.qualificationRefusal(), .clockRelationUnverified)
+        XCTAssertEqual(native.qualificationRefusal(clockRelation: .verifiedCoreMediaHostTime), nil)
+    }
+
+    func testStaleNativeTimeCannotBeRepairedByDelayedCompletion() {
+        for completion in [time(110), time(10_000)] {
+            XCTAssertEqual(timing(presentation: time(99), completion: completion)
+                .qualificationRefusal(clockRelation: .verifiedCoreMediaHostTime), .stalePresentationTime)
+        }
+        XCTAssertEqual(timing(presentation: time(111))
+            .qualificationRefusal(clockRelation: .verifiedCoreMediaHostTime), .futurePresentationTime)
+    }
+
+    func testStaticSampleRemainsUsableButNonadvancingTimingFailsStrictQualification() throws {
+        let captured = try read(makeSample())
+        XCTAssertEqual(captured.image.width, 2)
+        XCTAssertEqual(captured.timing.qualificationRefusal(clockRelation: .verifiedCoreMediaHostTime,
+            previousPresentationTime: time(105)), .nonadvancingPresentationTime)
+        XCTAssertEqual(captured.timing.qualificationRefusal(clockRelation: .verifiedCoreMediaHostTime,
+            previousPresentationTime: time(106)), .nonadvancingPresentationTime)
+    }
+
+    func testRationalComparisonDoesNotRoundDistinctNativeTimesToMilliseconds() {
+        let native = timing(presentation: time(105_001, scale: 1_000_000))
+        XCTAssertEqual(native.qualificationRefusal(clockRelation: .verifiedCoreMediaHostTime,
+            previousPresentationTime: time(105, scale: 1_000)), nil)
+        XCTAssertEqual(native.qualificationRefusal(clockRelation: .verifiedCoreMediaHostTime,
+            previousPresentationTime: time(105_001, scale: 1_000_000)), .nonadvancingPresentationTime)
+    }
+
+    func testDifferentEpochsAndInvalidHostBracketsCannotQualify() {
+        for native in [timing(request: .invalid), timing(completion: time(99)),
+                       timing(completion: time(110, epoch: 1))] {
+            XCTAssertEqual(native.qualificationRefusal(clockRelation: .verifiedCoreMediaHostTime),
+                           .invalidHostBracket)
+        }
+        XCTAssertEqual(timing(presentation: time(105, epoch: 1))
+            .qualificationRefusal(clockRelation: .verifiedCoreMediaHostTime), .clockEpochMismatch)
+        XCTAssertEqual(timing().qualificationRefusal(clockRelation: .verifiedCoreMediaHostTime,
+            previousPresentationTime: time(100, epoch: 1)), .clockEpochMismatch)
+    }
+
+    func testCancelledSampleReadDoesNotReturnPixelsOrTiming() async throws {
+        let sample = try makeSample()
+        let task = Task { () throws -> HostCapturedSample in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try self.read(sample)
+        }
+        do { _ = try await task.value; XCTFail("Cancelled sample accepted") }
+        catch { XCTAssertTrue(error is CancellationError) }
+    }
+
+    @MainActor
+    func testPermissionWithdrawalAndOptOutRejectReturnedSample() async throws {
+        let sample = try makeSample()
+        for withdrawPermission in [true, false] {
+            var granted = true, enabled = true
+            let permission = HostCapturePermission(preflight: { granted }, request: { false })
+            do {
+                _ = try await permission.withCaptureAuthorization(enabled: { enabled }) {
+                    let captured = try self.read(sample)
+                    if withdrawPermission { granted = false } else { enabled = false }
+                    return captured
+                }
+                XCTFail("Withdrawn authorization accepted pixels/timing")
+            } catch {
+                XCTAssertEqual(error as? HostCaptureError,
+                               withdrawPermission ? .permissionRequired : .notEnabled)
+            }
+        }
     }
 }

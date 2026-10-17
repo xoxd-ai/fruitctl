@@ -273,6 +273,22 @@ test('type_secret resolves on the broker, reaches only the executor and returns 
   assert.equal((await verifyJournal(file)).ok, true);
 });
 
+test('a batch sent while a secret resolves runs after it, in arrival order', async t => {
+  // A slow vault command must not let a pipelined Return submit the field
+  // before the secret is typed.
+  const profile = { secrets: { slow: { provider: 'command',
+    argv: [node, '-e', `setTimeout(() => process.stdout.write(${JSON.stringify(SECRET)}), 300)`] } } };
+  const { calls, executor } = recordingExecutor();
+  const lane = new TargetLane(profile, async () => executor, { name: 'desk' });
+  t.after(() => lane.close());
+  lane.acquire('0a0a0a0a-0b0b-4c0c-8d0d-0e0e0e0e0e0e');
+  const typed = lane.execute([{ action: 'type_secret', ref: 'slow' }]);
+  const submitted = lane.execute([{ action: 'wait', ms: 50 }]);
+  await Promise.all([typed, submitted]);
+  assert.deepEqual(calls.map(call => call.action), ['type_secret', 'wait']);
+  assert.equal(calls[0].secret, SECRET);
+});
+
 test('type_secret refusals are typed, pre-admission and start nothing', async t => {
   const { profile } = await secretProfile(t);
   let started = 0;

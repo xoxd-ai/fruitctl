@@ -122,6 +122,11 @@ test('a failed append forgets its cached head and never extends a partial record
 test('journal params never store type_secret text or credential-like fields', () => {
   assert.deepEqual(redactParams({ action: 'type_secret', ref: 'login', text: 'hunter2', value: 'x' }),
     { ref: 'login', text: '[redacted]', value: '[redacted]' });
+  // A refused request may carry the value in a kept field; only the expected shape survives.
+  assert.deepEqual(redactParams({ action: 'type_secret', ref: 'login', x: 'hunter2', y: 4, provider: 'hunter2',
+    length_class: 'hunter2' }), { ref: 'login', x: '[redacted]', y: 4, provider: '[redacted]', length_class: '[redacted]' });
+  assert.deepEqual(redactParams({ action: 'type_secret', ref: 'hunter 2!', x: 1, y: 2, provider: 'file', length_class: '9-16' }),
+    { ref: '[redacted]', x: 1, y: 2, provider: 'file', length_class: '9-16' });
   assert.deepEqual(redactParams({ action: 'configure', password: 'p', apiKey: 'k', nested: { authToken: 't', ok: 1 } }),
     { password: '[redacted]', apiKey: '[redacted]', nested: { authToken: '[redacted]', ok: 1 } });
   // A keyboard key is not a credential.

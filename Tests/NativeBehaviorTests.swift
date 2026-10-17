@@ -261,6 +261,23 @@ final class NativeBehaviorTests: XCTestCase {
         XCTAssertTrue(trace.values.isEmpty)
     }
 
+    // A not-ready refusal after the secret's first key must not surface as
+    // -32013, which promises that no event was written.
+    func testSecretNotReadyAfterFirstKeyIsNotReportedAsARefusal() async throws {
+        var downs = 0
+        let input = InputController(vnc: VNCBridge(config: .init()), keySender: { _, down, _, _ in
+            if down { downs += 1 }
+            if down, downs == 2 { throw VNCError.inputNotReady(remainingMilliseconds: 5) }
+        }, sleeper: { _ in })
+        do {
+            try await input.typeSecret("ab", focusAt: nil)
+            XCTFail("interrupted secret succeeded")
+        } catch SecretTypingError.interrupted {
+            XCTAssertNil(PCResponse.inputNotReady(id: nil, error: SecretTypingError.interrupted))
+        } catch { XCTFail("unexpected error: \(error)") }
+        XCTAssertTrue(input.heldKeys.isEmpty)
+    }
+
     func testTypeSecretTakesOnlyThePrivateSecretFieldWithPairedCoordinates() throws {
         let scaling = DisplayScaling(nativeWidth: 1920, nativeHeight: 1080)
         XCTAssertTrue(PCRequest.inputMethods.contains("type_secret"))

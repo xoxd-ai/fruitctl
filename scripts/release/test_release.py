@@ -69,7 +69,11 @@ class RuntimeSourceSelectionTests(unittest.TestCase):
     def git(self, *args):
         # These settings affect only this owned temporary fixture command;
         # no production Git hooks, signing config or repository are changed.
+        # A commit otherwise spawns a detached `git maintenance run --auto`
+        # that can still be writing .git/objects when the temporary
+        # directory is removed (ENOTEMPTY in cleanup).
         return subprocess.check_output(["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+                                        "-c", "maintenance.auto=false", "-c", "gc.auto=0",
                                         "-c", "user.name=Runtime Source Fixture", "-c", "user.email=fixture@example.invalid",
                                         *args], cwd=self.root, stderr=subprocess.STDOUT)
 

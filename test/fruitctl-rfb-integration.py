@@ -1291,6 +1291,14 @@ def run_streaming_scenario(model, request_mode, args):
         time.sleep(0.3)  # connect-time exchange; in stream mode the animation is streaming
         animating = fixture.snapshot()["animationFrames"]
         if request_mode == "stream":
+            # A tick answers only an outstanding re-arm, so the frame rate is
+            # the client's round trip, not ANIMATION_TICK_SECONDS; a loaded
+            # runner can stream fewer than three frames in a fixed settle.
+            # Wait for the precondition with a bound instead of a rate.
+            deadline = time.monotonic() + 5
+            while animating < 3 and time.monotonic() < deadline:
+                time.sleep(0.01)
+                animating = fixture.snapshot()["animationFrames"]
             require(animating >= 3, "%s: the stream was not animating before the first capture (%d)"
                     % (name, animating))
         sequence = 0

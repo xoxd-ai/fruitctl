@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { deflateSync } from 'node:zlib';
 import { scene } from './qualification/scene.mjs';
-import { overlaySignature, controlAnchored, runGate, OVERLAY_RGB } from '../scripts/qualification/overlay_exclusion_gate.mjs';
+import { overlaySignature, controlAnchored, runGate, OVERLAY_RGB, DETECTORS, edgeBandSignature } from '../scripts/qualification/overlay_exclusion_gate.mjs';
 
 const runId = '0123456789abcdef0123456789abcdef';
 const width = 960, height = 640;
@@ -78,6 +78,29 @@ test('detector: a faint interior leak is located, not only the edge ring', () =>
   assert.equal(signature.tinted, 800);
   assert.deepEqual(signature.bounds, { x: 600, y: 100, width: 40, height: 20 });
   assert.ok(!controlAnchored(signature));
+});
+
+// A real desktop: menu-bar greys, a dark Dock, white windows and a saturated
+// blue (which hides the tint) at the edges; purple only as interior content.
+function desktop() {
+  const pixels = new Uint8Array(width * height * 4);
+  const edges = [[128, 128, 128], [240, 240, 240], [30, 30, 30], [30, 90, 200]];
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const inner = x > 40 && y > 40 && x < width - 40 && y < height - 40;
+    const colour = inner && (x >> 5) % 3 === 0 ? [150, 40, 200] : edges[((x >> 5) + (y >> 5)) % 4];
+    pixels.set([...colour, 255], (y * width + x) * 4);
+  }
+  return { width, height, pixels };
+}
+
+test('edge-band detector: anchors on the overlay over a real desktop and passes the clean desktop', () => {
+  const edge = DETECTORS['edge-band'];
+  assert.ok(!edge.leaked(edgeBandSignature(desktop())));
+  for (const frame of [withOverlay(desktop()), halfScale(withOverlay(desktop())), overlaid]) {
+    const signature = edgeBandSignature(frame);
+    assert.ok(controlAnchored(signature), JSON.stringify(signature.sides));
+    assert.ok(edge.leaked(signature));
+  }
 });
 
 const hostLabels = { route: 'host', indicator: 'present', capture_backend: 'owned_sck',

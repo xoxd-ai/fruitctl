@@ -23,12 +23,17 @@ test-broker node="node":
 
 # Offline full-raster fixture and streaming-oracle checks; contacts no desktop.
 test-qualification node="node":
-    {{quote(node)}} --test --test-concurrency=1 test/qualification.test.js test/qualification-stream.test.js test/qualification-overlay-gate.test.js
+    {{quote(node)}} --test --test-concurrency=1 test/qualification.test.js test/qualification-stream.test.js test/qualification-overlay-gate.test.js test/qualification-live-kit.test.js
 
 # Attended Host-route overlay exclusion gate (observation only; see scripts/qualification/README.md).
 # Extra gate flags follow the three paths; there is no optional positional before them.
 qualification-overlay-gate target control output_dir *args:
     node scripts/qualification/overlay_exclusion_gate.mjs --attended --target {{quote(target)}} --control {{quote(control)}} --output-dir {{quote(output_dir)}} {{args}}
+
+# Attended PZM live qualification kit, one gate per call (see scripts/qualification/README.md).
+# gate: desktop_state, ax, clipboard, type_secret or overlay_600. Extra gate flags follow.
+qualification-live gate target socket output_dir *args:
+    node scripts/qualification/live_{{gate}}.mjs --attended --target {{quote(target)}} --socket {{quote(socket)}} --output-dir {{quote(output_dir)}} {{args}}
 
 # Developer file-only NDJSON oracle; its private prepared series arrives on stdin.
 qualification-scene-stream node="node":

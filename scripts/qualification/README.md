@@ -236,3 +236,82 @@ frame's hash, latency, overlay pixel count and label failures. Exit 0 is
 gate does not qualify scene validity (use `scene_stream.mjs`), consent, Stop,
 input mapping or the human-visible heartbeat.
 
+
+## Attended live qualification kit (PZM)
+
+Five drivers and one checklist for the next attended window, run in this
+order. Each driver is an MCP client of the operator's configured profile,
+started exactly as a frontend starts it (`fruitctl mcp --target PROFILE
+--socket /abs/broker.sock`), and refuses to run without `--attended`, an
+interactive terminal and a new absolute `--output-dir` (created mode 0700).
+It prints each operator step and waits for Enter (`s` skips, `a` aborts),
+saves every returned frame with its SHA-256, and writes
+`<gate>-result.json` (`fruitctl.live-qualification.v1`): every check with its
+expected and observed value, operator steps, and each call's code and
+latency. A gate is `passed` only when every check ran and passed; a skipped
+step makes it `incomplete`. Exit 0 is `passed`, 1 is `failed` or
+`incomplete`, 2 is a usage or transport error. Drivers never launch an app,
+change a setting, answer a dialog or run anything on the target; the
+operator does that when a step asks. Output is private evidence.
+
+```sh
+just qualification-live GATE PROFILE /abs/broker.sock /abs/new-output-dir [gate flags]
+# GATE: desktop_state | ax | clipboard | type_secret | overlay_600
+# --fruitctl /abs/installed/fruitctl selects the installed launcher under test.
+```
+
+**Prerequisites.** Node 24 with `npm ci`; the release under test installed on
+the Darwin controller and its broker running; the Host installed, capture
+enabled, Screen Recording and Accessibility granted (expect one Screen
+Recording re-confirmation on the first capture after an install, per D38).
+Profiles on the broker: `pzm` on the Host route (`hostHelper` with the
+qualified mapping, `desktopState` reaching the console user,
+`clipboard.read: true`, `input.pasteUnmappable: true`, and a `secrets` entry
+`qual-canary` with the `file` provider); `pzm-raw`, the same Mac without
+`hostHelper`; `pzm-noclip`, the same Mac with `clipboard.read: false`. On the
+broker host, write a throwaway canary of 16+ characters to the canary file,
+mode 0600. Never allowlist a real credential for this kit.
+
+| Order | Gate | Flags | Operator steps | Passes when |
+| --- | --- | --- | --- | --- |
+| 1 | `desktop_state` (a) | — | Lock the screen, then unlock; run `pmset displaysleepnow` in your own Terminal on the target, then wake it; raise a real system dialog (an administrator prompt or a TCC consent prompt), then answer it | `health` reports each state; a `mouse_move` probe is refused `target_locked`, `display_asleep`, `human_consent_required` (with `owner` and `kind`); after each clear, `health` is clear and the probe is admitted |
+| 2 | `ax` (b) | — | Open a popover with a button (Notes **Aa**), a sheet (TextEdit save sheet), keep the menu bar visible; pick the element when several match; confirm the effect | `ax_snapshot` succeeds; `click_element` returns `verified: true` and the Host names the surface (`popover`, `sheet`, `menu_extra` or `control_center`); the frame changes; a fresh snapshot succeeds; operator confirms |
+| 3 | `clipboard` (c) | `--read-disabled-target pzm-noclip` | Focus an empty plain-text TextEdit document | `paste` of emoji/CJK text round-trips through `clipboard_read` exactly, `utf8`, `fresh: true`; a routed `key_type` reports `kind: "paste"` and the clipboard reads back the saved value; `pzm-noclip` refuses `clipboard_read_disabled` with no text |
+| 4 | `type_secret` (d) | `--ref qual-canary` | Focus an empty plain-text TextEdit document | An unlisted ref is refused `secret_ref_not_allowed`; `type_secret` succeeds with no value in its result; copying the typed text makes `clipboard_read` return `redacted: true`, which the broker does only for a declared secret; the field and clipboard are cleared |
+| 4b | journal check | on the broker host: `node scripts/qualification/live_type_secret.mjs --check-journal FILE --secret-file PATH` | Choose the newest `journal/<session>.jsonl` (`ls -t`) | The chain verifies, the canary appears nowhere, and every `type_secret` record keeps only `ref`, `x`, `y`, `provider`, `length_class` |
+| 5 | `overlay_600` (e) | `--control-target pzm-raw [--control-at 300]` | Show the scene fixture full screen, or a desktop with neutral edges | 600 Host frames at 100 ms, all attested Host labels, none with the overlay in any 4 px edge band, and 95% within 5 s; the raw VNC control taken mid-series, while the Host lease is up, shows the overlay on at least half of every band. This is the D41/D42 gate receipt (`overlay-exclusion-receipt.json`) |
+| 6 | relay journey (f) | checklist below | | |
+
+Gate (e) uses the edge-band detector of the attended 2026-10-17 run
+(`--detector edge-band` on `overlay_exclusion_gate.mjs`): a pixel is tinted
+when R − G ≥ 25 and B − G ≥ 45, read in 4 px bands at each edge; a Host frame
+fails when any band is at least 1% tinted. The tint is visible over neutral,
+light, dark and purple backgrounds but not over saturated blue, green or red
+(an edge with R < G − 10 or B < G − 14). Such an edge cannot anchor the
+control, so the result is `unanchored`, never a false `passed`. Gate (e)
+requests `format: "png"` for every frame (D38), as the standalone gate does.
+
+**Relay journey checklist (f), Rocky Linux seat to the Darwin broker.** Run on
+the Linux seat with its relay attached to the Darwin bridge:
+
+1. `fruitctl relay --health` reports `up` (an older Darwin attach without a
+   hello reports `connecting` until the first session is answered).
+2. From the Darwin host, `fruitctl doctor --macos --target pzm` passes; from
+   the seat, the same command runs through the bridge.
+3. Run gates (a), (c) and (d) on the seat with `--socket` set to the relay
+   socket (`$XDG_RUNTIME_DIR/fruitctl/relay.sock`). The same checks must pass;
+   the seat never holds the canary or the VNC credential.
+4. Run the journal check (4b) on the Darwin host against the seat's
+   `type_secret` session: the seat sent the ref only.
+5. During one idle session, the operator interrupts the bridge (for example
+   stops the seat's SSH connection). The next call fails with a typed
+   `bridge_*` code (`bridge_lost` only when the link was confirmed and work
+   may be in flight), nothing is replayed, and `relay --health` returns to
+   `up` once the bridge is back. The interrupted MCP session does not reopen;
+   a new session must work.
+6. On the Darwin host, each seat session left its own journal file and
+   `fruitctl journal verify` returns `"ok": true` for each.
+
+The kit qualifies these behaviours on one Mac and one release. It does not
+qualify a frontend (see the frontend acceptance journey in `docs/agents.md`),
+Stop, the human-visible heartbeat or the product SLO.

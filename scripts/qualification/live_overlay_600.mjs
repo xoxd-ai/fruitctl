@@ -38,7 +38,7 @@ export async function overlay600Gate({ clients, calls, output, verdict, values, 
       arguments: action === 'screenshot' ? { action, format: 'png' } : { action } }),
     onFrame: async (png, record) => {
       if (record.number === controlAt) { controlWindow = { afterHostFrame: controlAt }; startCapture(controlAt); }
-      if (!record.ok) {
+      if (!record.ok || values['save-frames']) { // Failing frames always; every frame with --save-frames.
         await writeFile(path.join(output, `host-frame-${String(record.number).padStart(4, '0')}.png`), png,
           { flag: 'wx', mode: 0o600 });
       }
@@ -62,6 +62,7 @@ export async function overlay600Gate({ clients, calls, output, verdict, values, 
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main({ name: 'overlay-600', file: 'live_overlay_600.mjs', gate: overlay600Gate,
-    options: { 'control-target': { type: 'string' }, frames: { type: 'string' }, 'control-at': { type: 'string' } },
+    options: { 'control-target': { type: 'string' }, frames: { type: 'string' }, 'control-at': { type: 'string' },
+      'save-frames': { type: 'boolean' } },
     sessions: [{ option: 'control-target', role: 'control' }] });
 }

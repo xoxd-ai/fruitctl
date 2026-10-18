@@ -96,7 +96,10 @@ focus the field first. Then:
 - The batch joins the target's queue in arrival order. The broker runs the
   provider only after every refusal that sends nothing has passed: the
   desktop-state sentinel, the backend's capabilities, the route and the Stop
-  latch. A refused batch never reads its secret.
+  latch. A refused batch never reads its secret. After the provider returns,
+  the sentinel is read again (from its ~2 s cache when the provider was
+  fast), so a dialog that appeared during a slow provider is still refused
+  before any key is sent.
 - The broker resolves the value and hands it to the native controller as a
   private request field on its stdin pipe. The controller plans every
   character before sending anything, so an untypable secret sends neither the

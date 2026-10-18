@@ -317,6 +317,22 @@ test('a provider runs only after every pre-admission refusal, and a bad deadline
   assert.ok(!lane.releasing && lane.owner, 'the lease survives every refusal');
 });
 
+test('a cancel while the provider runs is a typed refusal, not a broker crash', async t => {
+  const dir = await directory(t);
+  const { calls, executor } = recordingExecutor();
+  const lane = new TargetLane({ secrets: { slow: countedSecret(path.join(dir, 'runs'), 2000) } }, async () => executor);
+  t.after(() => lane.close());
+  lane.acquire('0a0a0a0a-0b0b-4c0c-8d0d-0e0e0e0e0e0e');
+  const cancel = new AbortController();
+  setTimeout(() => cancel.abort(new Error('client cancelled')), 100);
+  await assert.rejects(lane.execute([{ action: 'type_secret', ref: 'slow' }], { signal: cancel.signal }),
+    error => error.code === 'secret_unavailable' && isPreAdmissionRefusal(error));
+  // An unobserved rejection would surface here and fail the file.
+  await delay(50);
+  assert.deepEqual(calls, []);
+  assert.ok(!lane.releasing && lane.owner);
+});
+
 test('an idle timer cannot retire the lane under a slow provider', async t => {
   const dir = await directory(t);
   const { calls, executor } = recordingExecutor();

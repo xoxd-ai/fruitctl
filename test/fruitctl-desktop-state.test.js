@@ -204,6 +204,20 @@ test('D16: type_secret is never typed into a consent dialog', async t => {
   assert.equal(started, 0);
   assert.deepEqual(sent, []);
   await assert.rejects(fs.stat(marker), { code: 'ENOENT' }, 'the secret was never resolved');
+
+  // A dialog that appears while the provider runs is refused before any key.
+  const later = sentinelProbe([variant(), variant({ desktop_windows: windows('window|824|8|500|300|1') })]);
+  const typed = recordingFactory();
+  const slow = new TargetLane({ desktopState: { ssh: 'op@mac' }, secrets: { login } }, typed.factory,
+    { desktopProbe: later.probe });
+  t.after(() => slow.close());
+  slow.desktop.ttlMs = 0;
+  slow.acquire('0a0a0a0a-0b0b-4c0c-8d0d-0e0e0e0e0e0e');
+  await assert.rejects(slow.execute([{ action: 'type_secret', ref: 'login' }]),
+    error => error.code === HUMAN_CONSENT_REQUIRED_CODE && isPreAdmissionRefusal(error));
+  assert.deepEqual(typed.sent, []);
+  assert.equal(later.calls.length, 2, 'the sentinel was read again after the provider');
+  assert.ok(!slow.releasing && slow.owner, 'the lease survives');
 });
 
 test('Host element actions never press or focus under a consent dialog', async t => {

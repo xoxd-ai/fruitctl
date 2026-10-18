@@ -9,9 +9,11 @@ The flake exports `packages.<system>.fruitctl` (`default`, `runtime` and `proxy`
 aliases), `homeManagerModules.default`, `overlays.default`, and the canonical skill at
 `share/fruitctl/skills/fruitctl`. The Node package is available for ARM and x86
 Darwin/Linux evaluation. `packages.aarch64-darwin.native-controller` supplies
-the released alpha.11 signed controller; native VNC control is Apple Silicon
-Darwin only. Linux uses the SSH bridge. The Host prototype has no public package
-export or runtime payload.
+the released alpha.12 signed controller; native VNC control is Apple Silicon
+Darwin only. Linux uses the SSH bridge. The optional Host app has no Nix package
+export and is not part of the runtime payload: it ships as the separate
+native-only release [`v0.1.0-native.2`](https://github.com/xoxd-ai/fruitctl/releases/tag/v0.1.0-native.2),
+installed on the target with `fruitctl-host-install`.
 
 ```nix
 inputs.fruitctl.url = "github:xoxd-ai/fruitctl/1ba90e84d4b6fe464c9146e7c41c4cffc3edf8e3";
@@ -54,13 +56,15 @@ Every consumer's final pin, package realization and Home Manager activation
 need their own recorded checks; changing this example does not upgrade a
 published runtime archive.
 
-The public [alpha.11 runtime](https://github.com/xoxd-ai/fruitctl/releases/tag/v0.1.0-alpha.11)
-is produced from `142743262d3242775f210c9d62a6b8e423c3ce5a`. Its Darwin runtime
+The public [alpha.12 runtime](https://github.com/xoxd-ai/fruitctl/releases/tag/v0.1.0-alpha.12)
+is produced from `5e985fcefbca8c25113c70b347c66c713219336e`. Its Darwin runtime
 carries a controller built, tested, signed and notarized from that same
 revision, and the explicitly selected `native-controller` package consumes
-those immutable bytes on any pin that includes the alpha.11
-`nix/native-release.json`. Pins that include the alpha.10 file select the
-alpha.10 controller produced from `a80d40a5b27f4917200f8248f813605f5c2c1fea`.
+those immutable bytes on any pin that includes the alpha.12
+`nix/native-release.json`. Pins that include the alpha.11 file select the
+alpha.11 controller produced from `142743262d3242775f210c9d62a6b8e423c3ce5a`,
+and pins that include the alpha.10 file select the alpha.10 controller produced
+from `a80d40a5b27f4917200f8248f813605f5c2c1fea`.
 Earlier pins select the alpha.3 controller produced from
 `e00fcc86bbac4247d5a0847d7e656369c52cc15f`, which alpha.9 also reused.
 Advancing the source pin does not rebuild, patch or re-sign released bytes.
@@ -256,7 +260,7 @@ requalified with the new `nativeWidth`/`nativeHeight`. Unset
 fields are omitted from the generated configuration, never written as null.
 
 The `native-controller` package extracts only the unchanged signed controller
-from the [alpha.11 Darwin runtime](https://github.com/xoxd-ai/fruitctl/releases/tag/v0.1.0-alpha.11).
+from the [alpha.12 Darwin runtime](https://github.com/xoxd-ai/fruitctl/releases/tag/v0.1.0-alpha.12).
 Its output contains `bin/claude-kvm-daemon`, the native notices and curated
 release metadata; the separate Node package owns `bin/fruitctl`. Archive,
 executable and notice hashes, archive file modes, ARM64 linkage and the strict
@@ -265,9 +269,9 @@ archive executable mode `0755` need not remain unchanged in the store; the
 executable bytes and signature remain unchanged. Fixups, stripping and
 re-signing are disabled.
 The exact artifact and corresponding-source bindings live in
-[`nix/native-release.json`](../nix/native-release.json), the alpha.11
+[`nix/native-release.json`](../nix/native-release.json), the alpha.12
 controller input. Apple returned `Accepted` for its controller-ZIP submission
-`ed81cbd8-3a8c-4113-a1c3-455a4781c5c5`; that does not notarize the complete
+`2e1c05fb-3341-42cc-9e97-16f167038a1f`; that does not notarize the complete
 runtime archive. The command-line tool is not stapled. These checks do not
 qualify real VNC authentication, target pixels/input mapping, an agent frontend,
 the Linux bridge journey or product SLOs.
@@ -278,7 +282,7 @@ binary and receipt hashes, expected signing identifier and Developer ID team,
 and disables binary fixups/stripping. It is a historical diagnostic baseline;
 it **does not include the current fresh-frame repair**. Selecting it explicitly
 does not qualify a new Fruitctl release. It remains separate from the explicitly
-selected alpha.11 `native-controller` package.
+selected alpha.12 `native-controller` package.
 
 ## Linux SSH controller
 

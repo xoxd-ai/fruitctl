@@ -42,6 +42,10 @@ let
     input.pasteUnmappable = true;
   } // lib.optionalAttrs (clipboardPolicy target != { }) {
     clipboard = clipboardPolicy target;
+  } // lib.optionalAttrs (wakePolicy target != { }) {
+    wake = wakePolicy target;
+  } // lib.optionalAttrs (desktopStatePolicy target != { }) {
+    desktopState = desktopStatePolicy target;
   } // lib.optionalAttrs (target.daemonPath != null || nativePath != null) {
     daemonPath = if target.daemonPath != null then target.daemonPath else nativePath;
   } // lib.optionalAttrs (target.hostHelper != null) {
@@ -57,6 +61,15 @@ let
     read = if target.clipboard.read then true else null;
     extended = if target.clipboard.extended then null else false;
     inherit (target.clipboard) maxBytes ttlMs;
+  };
+  # Broker defaults: no wake hold; a sentinel on the first usable destination
+  # (desktopState.ssh, wake.ssh, hostHelper.sshHost). Only non-defaults render.
+  wakePolicy = target: lib.optionalAttrs (target.wake.ssh != null) ({
+    inherit (target.wake) ssh;
+  } // lib.optionalAttrs (!target.wake.enabled) { enabled = false; });
+  desktopStatePolicy = target: lib.filterAttrs (_: value: value != null) {
+    inherit (target.desktopState) ssh;
+    enabled = if target.desktopState.enabled then null else false;
   };
   brokerConfig = {
     schema = "fruitctl.config.v1";
@@ -196,12 +209,38 @@ let
         default = null;
         description = "Absolute signed native-client path; overrides nativePackage for this target.";
       };
+      wake = {
+        ssh = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "alex@office-desktop";
+          description = "Opt-in display wake hold: while a client owns the lease, the broker runs `caffeinate -d -u` on the target over this SSH destination (user@host or an existing alias). Unset means no hold. Advisory; failures are reported in health and never fail input.";
+        };
+        enabled = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = "False turns the wake hold off while keeping wake.ssh, which the desktop-state sentinel still uses as its fallback destination.";
+        };
+      };
+      desktopState = {
+        enabled = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = "Desktop-state sentinel: before input, read lock, display sleep and consent-dialog state over SSH and refuse input that macOS would block. On by default whenever a destination is known; false disables it.";
+        };
+        ssh = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "alex@office-desktop";
+          description = "Sentinel SSH destination, ideally the console user. Unset falls back to wake.ssh, then hostHelper.sshHost; with none of them the sentinel reports not_configured and refuses nothing.";
+        };
+      };
       hostHelper = lib.mkOption {
         default = null;
         type = lib.types.nullOr (lib.types.submodule {
           options = {
             sshHost = lib.mkOption { type = lib.types.str; description = "Existing SSH host alias for the separately installed capture/indicator helper."; };
-            command = lib.mkOption { type = lib.types.listOf lib.types.str; description = "Absolute helper executable and literal arguments; no shell expression."; };
+            command = lib.mkOption { type = lib.types.listOf lib.types.str; description = "[ \"/absolute/path/FruitctlHost\" \"--stdio\" ]: the Host executable and its stdio flag, exactly as the broker accepts it; no shell expression."; };
             displayId = lib.mkOption { type = lib.types.nullOr lib.types.ints.unsigned; default = null; description = "Qualified target display identifier. Set this, displayUuid, or both."; };
             displayUuid = lib.mkOption { type = lib.types.nullOr lib.types.str; default = null; description = "CoreGraphics display UUID (FruitctlHost --doctor lists them). Survives display-ID changes; the Host must run with the same --display-uuid."; };
             mapping = lib.mkOption {
@@ -232,6 +271,8 @@ let
       };
     };
   };
+  # Same character set as the broker's wake, sentinel, helper and doctor SSH validators.
+  sshDestination = value: value == null || builtins.match "[a-zA-Z0-9_][]a-zA-Z0-9_.@:[-]{0,255}" value != null;
   absolute = value: value != null && lib.hasPrefix "/" value && !(lib.hasInfix "\n" value);
   displayUuid = value: builtins.match "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}" value != null;
   sameUuid = left: right: if left == null || right == null then left == right else lib.toUpper left == lib.toUpper right;
@@ -333,7 +374,7 @@ in {
         { assertion = cfg.bridgeSocketPath == null || absolute cfg.bridgeSocketPath; message = "Fruitctl bridgeSocketPath must be an absolute remote path when supplied."; }
         { assertion = cfg.bridgeCommand == "fruitctl" || absolute cfg.bridgeCommand; message = "Fruitctl bridgeCommand must be fruitctl or an absolute executable path."; }
         { assertion = isDarwin || (cfg.bridgeHost != null && cfg.bridgeHost != "" && !(lib.hasPrefix "-" cfg.bridgeHost) && !(lib.hasInfix "\n" cfg.bridgeHost)); message = "Linux Fruitctl requires an existing Darwin bridgeHost SSH alias."; }
-        { assertion = isDarwin || (cfg.nativePackage == null && builtins.all (name: cfg.targets.${name}.targetId == null && cfg.targets.${name}.inputSource == null && !cfg.targets.${name}.input.pasteUnmappable && clipboardPolicy cfg.targets.${name} == { } && cfg.targets.${name}.credentialFile == null && cfg.targets.${name}.credential == null && cfg.targets.${name}.secrets == { } && cfg.targets.${name}.daemonPath == null && cfg.targets.${name}.hostHelper == null && cfg.targets.${name}.vnc.username == "" && cfg.targets.${name}.vnc.host == "127.0.0.1" && cfg.targets.${name}.vnc.port == 15900 && cfg.targets.${name}.vnc.captureTimeoutMs == null) targetNames); message = "Linux declares Fruitctl target names only; configure physical identities, VNC, credentials and native clients on the Darwin bridge."; }
+        { assertion = isDarwin || (cfg.nativePackage == null && builtins.all (name: cfg.targets.${name}.targetId == null && cfg.targets.${name}.inputSource == null && !cfg.targets.${name}.input.pasteUnmappable && clipboardPolicy cfg.targets.${name} == { } && cfg.targets.${name}.credentialFile == null && cfg.targets.${name}.credential == null && cfg.targets.${name}.secrets == { } && cfg.targets.${name}.daemonPath == null && cfg.targets.${name}.hostHelper == null && cfg.targets.${name}.vnc.username == "" && cfg.targets.${name}.vnc.host == "127.0.0.1" && cfg.targets.${name}.vnc.port == 15900 && cfg.targets.${name}.vnc.captureTimeoutMs == null && wakePolicy cfg.targets.${name} == { } && desktopStatePolicy cfg.targets.${name} == { }) targetNames); message = "Linux declares Fruitctl target names only; configure physical identities, VNC, credentials and native clients on the Darwin bridge."; }
         { assertion = !isDarwin || builtins.all (name: let target = cfg.targets.${name}; in
             (if target.credential != null then target.credentialFile == null && sourceValid target.credential else absolute target.credentialFile)
             && absolute (if target.daemonPath != null then target.daemonPath else nativePath)) targetNames;
@@ -341,8 +382,9 @@ in {
         { assertion = builtins.all (name: builtins.all (ref: builtins.match "[A-Za-z0-9][A-Za-z0-9_.-]{0,63}" ref != null && sourceValid cfg.targets.${name}.secrets.${ref})
             (builtins.attrNames cfg.targets.${name}.secrets)) targetNames;
           message = "Fruitctl secrets need ref names of letters, digits, '.', '_' or '-' and a complete provider: file.path absolute, env.name a variable name, command.argv with an absolute executable, or keychain.service and account."; }
-        { assertion = builtins.all (name: let helper = cfg.targets.${name}.hostHelper; in helper == null || (helper.sshHost != "" && builtins.length helper.command == 2 && absolute (builtins.head helper.command) && builtins.elemAt helper.command 1 == "--stdio" && (helper.displayId != null || helper.displayUuid != null) && (helper.displayId == null || helper.displayId > 0) && (helper.displayUuid == null || displayUuid helper.displayUuid))) targetNames; message = "Fruitctl hostHelper requires an SSH alias, [ absolute-executable --stdio ] command and a positive displayId or a displayUuid."; }
+        { assertion = builtins.all (name: let helper = cfg.targets.${name}.hostHelper; in helper == null || (builtins.match "[a-zA-Z0-9][]a-zA-Z0-9_.@:[-]{0,255}" helper.sshHost != null && builtins.length helper.command == 2 && absolute (builtins.head helper.command) && lib.hasSuffix "/FruitctlHost" (builtins.head helper.command) && builtins.elemAt helper.command 1 == "--stdio" && (helper.displayId != null || helper.displayUuid != null) && (helper.displayId == null || helper.displayId > 0) && (helper.displayUuid == null || displayUuid helper.displayUuid))) targetNames; message = "Fruitctl hostHelper requires an SSH alias, [ /absolute/path/FruitctlHost --stdio ] command and a positive displayId or a displayUuid."; }
         { assertion = builtins.all (name: cfg.targets.${name}.clipboard.ttlMs == null || cfg.targets.${name}.clipboard.read) targetNames; message = "Fruitctl clipboard.ttlMs requires clipboard.read."; }
+        { assertion = builtins.all (name: sshDestination cfg.targets.${name}.wake.ssh && sshDestination cfg.targets.${name}.desktopState.ssh) targetNames; message = "Fruitctl wake.ssh and desktopState.ssh must be explicit user@host destinations or SSH aliases, not options or shell text."; }
         { assertion = builtins.all (name: let helper = cfg.targets.${name}.hostHelper; mapping = if helper == null then null else helper.mapping; in mapping == null || (mapping.qualificationReceipt != "" && mapping.displayId == helper.displayId && sameUuid mapping.displayUuid helper.displayUuid && (mapping.scale == null || (mapping.scale >= 1 && mapping.scale <= 8)) && mapping.displayBounds.width > 0 && mapping.displayBounds.height > 0)) targetNames; message = "Fruitctl hostHelper mapping requires its qualification receipt, matching displayId/displayUuid, a scale within 1-8 when set, and positive display bounds."; }
       ];
       home.file = lib.optionalAttrs isDarwin {

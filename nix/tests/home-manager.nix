@@ -39,8 +39,29 @@ let
       input.pasteUnmappable = true;
       clipboard.read = true;
       clipboard.ttlMs = 60000;
+      wake.ssh = "fixture-user@fixture-target";
     };
   };
+  # Wake kept but off; sentinel off with its own destination.
+  sentinelOff = evaluate "aarch64-darwin" {
+    enable = true;
+    targets.desktop = {
+      credentialFile = "/Users/fruitctl-test/private/password";
+      daemonPath = "/Users/fruitctl-test/Applications/qualified-native/claude-kvm-daemon";
+      wake = { ssh = "fixture-user@fixture-target"; enabled = false; };
+      desktopState = { ssh = "console-user@fixture-target"; enabled = false; };
+    };
+  };
+  sentinelOffDocument = (builtins.fromJSON sentinelOff.home.file."Library/Application Support/fruitctl/config.json".text).targets.desktop;
+  attachmentRejected = builtins.all (extra: rejected "aarch64-darwin" {
+    enable = true;
+    targets.desktop = {
+      credentialFile = "/Users/fruitctl-test/private/password";
+      daemonPath = "/Users/fruitctl-test/Applications/qualified-native/claude-kvm-daemon";
+    } // extra;
+  }) [ { wake.ssh = "-oProxyCommand=touch"; } { desktopState.ssh = "user@host; reboot"; } ]
+  && builtins.all (extra: rejected "x86_64-linux" { enable = true; bridgeHost = "darwin-bridge"; targets.desktop = extra; })
+    [ { wake.ssh = "fixture-user@fixture-target"; } { desktopState.enabled = false; } ];
   nativeController = fruitctlFlake.packages.aarch64-darwin.native-controller;
   nativeDarwin = evaluate "aarch64-darwin" {
     enable = true;
@@ -166,7 +187,10 @@ let
     && rejected "aarch64-darwin" (uuidHelper (uuidMapping // { scale = 0.5; }))
     && rejected "aarch64-darwin" (uuidHelper (uuidMapping // { displayId = 7; }))
     && rejected "aarch64-darwin" (pkgs.lib.recursiveUpdate (uuidHelper null) { targets.desktop.hostHelper.displayUuid = "not-a-uuid"; })
-    && rejected "aarch64-darwin" (pkgs.lib.recursiveUpdate (uuidHelper null) { targets.desktop.hostHelper.displayUuid = null; });
+    && rejected "aarch64-darwin" (pkgs.lib.recursiveUpdate (uuidHelper null) { targets.desktop.hostHelper.displayUuid = null; })
+    # The broker accepts only the FruitctlHost executable and an alias-shaped sshHost.
+    && rejected "aarch64-darwin" (pkgs.lib.recursiveUpdate (uuidHelper null) { targets.desktop.hostHelper.command = [ "/usr/bin/ssh" "--stdio" ]; })
+    && rejected "aarch64-darwin" (pkgs.lib.recursiveUpdate (uuidHelper null) { targets.desktop.hostHelper.sshHost = "-oProxyCommand=x"; });
   linuxRelay = linux.systemd.user.services.fruitctl-relay.Service;
   darwinBroker = darwin.launchd.agents.fruitctl-broker.config;
   linuxFiles = linux.xdg.configFile;
@@ -311,6 +335,12 @@ assert darwinDocument.targets.desktop.input == { pasteUnmappable = true; };
 assert darwinDocument.targets.desktop.clipboard == { read = true; ttlMs = 60000; };
 assert !(nativeDocument.targets.desktop ? input) && !(nativeDocument.targets.desktop ? clipboard);
 assert linuxClipboardRejected && clipboardTtlWithoutReadRejected;
+assert darwinDocument.targets.desktop.wake == { ssh = "fixture-user@fixture-target"; };
+assert !(darwinDocument.targets.desktop ? desktopState);
+assert !(nativeDocument.targets.desktop ? wake) && !(nativeDocument.targets.desktop ? desktopState);
+assert sentinelOffDocument.wake == { ssh = "fixture-user@fixture-target"; enabled = false; };
+assert sentinelOffDocument.desktopState == { ssh = "console-user@fixture-target"; enabled = false; };
+assert attachmentRejected;
 assert darwinDocument.targets.desktop.credentialFile == "/Users/fruitctl-test/.config/private/desktop-password";
 assert helperDocument.targets.desktop.hostHelper.mapping.displayBounds.x == -1920;
 assert helperDocument.targets.desktop.hostHelper.mapping.nativeWidth == 3840;

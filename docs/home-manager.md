@@ -212,6 +212,29 @@ warns `input_source_mismatch` when the target selects another one
 clipboard policy ([clipboard](target-profile.md#clipboard-and-paste-routing)).
 Both default off, apart from `clipboard.extended`. Linux declares none of them.
 
+`targets.<profile>.desktopState` and `targets.<profile>.wake` attach the
+[desktop-state sentinel](target-profile.md#desktop-state-sentinel) and the
+[display wake hold](architecture.md#display-wake-hold). Their defaults match
+the broker's: the sentinel is on (`desktopState.enabled = true`) whenever it has
+a destination, which is `desktopState.ssh`, else `wake.ssh`, else
+`hostHelper.sshHost`; the wake hold is off until `wake.ssh` is set.
+
+```nix
+targets.desktop = {
+  # Hold the display awake while an agent owns the lease.
+  wake.ssh = "alex@office-desktop";
+  # Optional: probe as the console user on another destination,
+  # or `desktopState.enabled = false` to turn the sentinel off.
+  desktopState.ssh = "alex@office-desktop";
+};
+```
+
+`wake.enabled = false` turns the hold off but keeps `wake.ssh` as the
+sentinel's fallback. Both destinations must be an explicit `user@host` or an
+SSH alias; anything shaped like an option or shell text fails evaluation, as
+the broker would refuse it at startup. Only non-default fields are written.
+Linux declares neither; set them on the Darwin bridge.
+
 The optional Host/indicator remains a private prototype until its exact
 capture mode passes background and indicator-exclusion qualification. Alpha.8
 ships no Host app, ZIP, package export, service or helper mapping. The existing

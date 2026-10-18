@@ -10,7 +10,7 @@ import { Verdict, recorder } from '../scripts/qualification/live_kit.mjs';
 import { desktopStateGate } from '../scripts/qualification/live_desktop_state.mjs';
 import { clipboardGate } from '../scripts/qualification/live_clipboard.mjs';
 import { candidates } from '../scripts/qualification/live_ax.mjs';
-import { secretJournalChecks } from '../scripts/qualification/live_type_secret.mjs';
+import { secretJournalChecks, typeSecretGate } from '../scripts/qualification/live_type_secret.mjs';
 import { Journal, redactParams } from '../lib/broker/journal.mjs';
 
 const ok = structuredContent => ({ content: [{ type: 'text', text: 'OK' }], structuredContent });
@@ -89,5 +89,18 @@ test('type_secret journal check passes a broker-written journal and fails one ho
     assert.equal(secretJournalChecks(text, canary).status, 'passed');
     const leaked = text.replace('qual-canary', canary);
     assert.deepEqual(secretJournalChecks(leaked, canary).failures(), ['secret_absent_from_journal']);
+    // A canary JSON escapes in the file is still found.
+    const quoted = 'fruitctl-"canary"-7f3a9c21';
+    assert.deepEqual(secretJournalChecks(text.replace('qual-canary', JSON.stringify(quoted).slice(1, -1)), quoted)
+      .failures(), ['secret_absent_from_journal']);
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('type_secret gate sends no input when the operator skips the scratch editor', async () => {
+  const sent = [];
+  const raw = async (tool, args) => { sent.push(args.action); return ok({}); };
+  const verdict = new Verdict();
+  await typeSecretGate({ call: recorder(raw).call, operator: async () => 'skipped', verdict, values: { ref: 'qual-canary' } });
+  assert.deepEqual(sent, ['health']);
+  assert.notEqual(verdict.status, 'passed');
 });

@@ -47,7 +47,7 @@ export async function desktopStateGate({ call, operator, verdict, sleep, settleM
   const admitted = await call(probe, 'probe-baseline');
   verdict.check('baseline_input_admitted', !admitted.isError, errorCode(admitted), 'no error');
   for (const state of STATES) {
-    if (await operator(`${state.id}:block`, state.block) === 'skipped') { verdict.skip(state.id, 'operator skipped'); continue; }
+    if (await operator(`${state.id}:block`, state.block) === 'skipped') continue;
     await sleep(settleMs);
     const during = stateOf(await call({ action: 'health' }, `health-${state.id}`));
     verdict.check(`${state.id}_reported`, blocked(during, state.field), during, `${state.field} reported`);
@@ -59,7 +59,8 @@ export async function desktopStateGate({ call, operator, verdict, sleep, settleM
       verdict.check('consent_dialog_owner_named', typeof data?.owner === 'string' && typeof data?.kind === 'string',
         data ?? null, '{owner, kind}');
     }
-    await operator(`${state.id}:clear`, state.clear);
+    // An uncleared state would block every later probe; stop measuring.
+    if (await operator(`${state.id}:clear`, state.clear) === 'skipped') break;
     await sleep(settleMs);
     const after = stateOf(await call({ action: 'health' }, `health-${state.id}-cleared`));
     verdict.check(`${state.id}_cleared`, clear(after), after, 'clear');

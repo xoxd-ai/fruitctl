@@ -55,7 +55,8 @@ export function controlAnchored(signature) {
 // desktop, where the scene fixture's neutral background is not on screen: a
 // pixel is overlay-tinted when R - G >= 25 and B - G >= 45, read only in 4 px
 // bands along each edge, where the overlay is strongest (alpha >= 0.41 at the
-// dimmest heartbeat, so R - G >= 30 and B - G >= 53 over any colour).
+// dimmest heartbeat, so R - G >= 30 and B - G >= 53 over any neutral colour;
+// saturated blue, green or red edges hide it and leave the control unanchored).
 export const EDGE_BAND_PX = 4;
 export const EDGE_BAND_TINT = Object.freeze({ redOverGreen: 25, blueOverGreen: 45 });
 // An agent frame fails when any band is at least this tinted. A Host leak is

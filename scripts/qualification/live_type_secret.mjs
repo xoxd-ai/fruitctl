@@ -22,8 +22,10 @@ export async function typeSecretGate({ call, operator, verdict, values }) {
   const ref = values.ref;
   if (!ref) throw new Error('--ref names the allowlisted canary secret');
   await call({ action: 'health' }, 'health');
-  await operator('editor', 'On the target, open TextEdit with a new plain-text document and leave its text ' +
-    'area focused (empty). The canary will be typed there.');
+  // Without the scratch editor, the canary and the Command-A/Backspace
+  // cleanup would go to whatever has focus.
+  if (await operator('editor', 'On the target, open TextEdit with a new plain-text document and leave its text ' +
+    'area focused (empty). The canary will be typed there.') === 'skipped') return { ref };
   const unknown = await call({ action: 'type_secret', ref: 'fruitctl-not-allowlisted' }, 'type_secret-unlisted');
   verdict.check('unlisted_ref_refused', errorCode(unknown) === 'secret_ref_not_allowed', errorCode(unknown),
     'secret_ref_not_allowed');
@@ -50,7 +52,9 @@ export async function typeSecretGate({ call, operator, verdict, values }) {
 
 /** Pure check of one journal's text against the canary value. */
 export function secretJournalChecks(text, secret, verdict = new Verdict()) {
-  verdict.check('secret_absent_from_journal', !text.includes(secret), text.includes(secret) ? 'present' : 'absent', 'absent');
+  // A canary with a quote, backslash or control character is escaped in JSONL.
+  const present = text.includes(secret) || text.includes(JSON.stringify(secret).slice(1, -1));
+  verdict.check('secret_absent_from_journal', !present, present ? 'present' : 'absent', 'absent');
   const records = text.split('\n').filter(Boolean).map(line => JSON.parse(line));
   const typed = records.filter(record => record.method === 'type_secret');
   verdict.check('type_secret_recorded', typed.length > 0, typed.length, '>= 1');
@@ -68,8 +72,8 @@ async function journalMode() {
   const verdict = new Verdict();
   const chain = await verifyJournal(file);
   verdict.check('journal_chain_verifies', chain.ok, chain.ok ? { records: chain.records } : chain, 'ok');
-  // The provider strips one trailing newline; so does this check.
-  const secret = (await readFile(secretFile, 'utf8')).replace(/\r?\n$/, '');
+  // The provider strips one trailing LF, then one CR; so does this check.
+  const secret = (await readFile(secretFile, 'utf8')).replace(/\n$/, '').replace(/\r$/, '');
   // A short canary could occur in the journal by chance and prove nothing.
   if (secret.length < 16) throw new Error('Use a canary of at least 16 characters');
   secretJournalChecks(await readFile(file, 'utf8'), secret, verdict);

@@ -47,10 +47,7 @@ export async function axGate({ call, operator, ask, verdict, surfaces = SURFACES
   const health = await call({ action: 'health' }, 'health');
   verdict.check('host_route', health?.structuredContent?.route === 'host', health?.structuredContent?.route ?? null, 'host');
   for (const surface of surfaces) {
-    if (await operator(`${surface.id}:setup`, surface.setup) === 'skipped') {
-      verdict.skip(surface.id, 'operator skipped');
-      continue;
-    }
+    if (await operator(`${surface.id}:setup`, surface.setup) === 'skipped') continue;
     const snap = await call({ action: 'ax_snapshot', ...surface.snapshot }, `ax_snapshot-${surface.id}`);
     const snapshot = snap?.structuredContent?.ax_snapshot;
     if (!verdict.check(`${surface.id}_snapshot`, !snap.isError && snapshot, errorCode(snap), 'ax_snapshot')) continue;

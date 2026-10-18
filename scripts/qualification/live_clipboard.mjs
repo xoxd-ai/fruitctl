@@ -17,8 +17,9 @@ function clipboardText(result) {
 export async function clipboardGate({ call, calls, operator, verdict, values = {}, nonce = randomBytes(4).toString('hex') }) {
   const sample = `${SAMPLE_PREFIX} ${nonce}`;
   await call({ action: 'health' }, 'health');
-  await operator('editor', 'On the target, open TextEdit with a new plain-text document (Format > Make Plain ' +
-    'Text) and leave its text area focused. Its content will be replaced.');
+  // Without the scratch editor, paste would land in whatever has focus.
+  if (await operator('editor', 'On the target, open TextEdit with a new plain-text document (Format > Make Plain ' +
+    'Text) and leave its text area focused. Its content will be replaced.') === 'skipped') return { sample };
   const pasted = await call({ action: 'paste', text: sample }, 'paste-sample');
   verdict.check('paste_ok', !pasted.isError, errorCode(pasted), 'no error');
   const read = await call({ action: 'clipboard_read' }, 'clipboard_read-sample');

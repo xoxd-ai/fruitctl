@@ -99,12 +99,16 @@ export async function runCli({ name, file, options = {}, gate, sessions = [] }) 
   };
   const readline = createInterface({ input: process.stdin, output: process.stderr });
   const steps = [];
+  const verdict = new Verdict();
+  // Any skipped step leaves the gate incomplete; a gate also stops sending
+  // input that depended on a skipped setup step.
   const operator = async (id, instruction) => {
     process.stderr.write(`\n[${name}] OPERATOR STEP ${id}\n${instruction}\n`);
     const answer = (await readline.question('Enter = done, s = skip, a = abort: ')).trim().toLowerCase();
     const outcome = answer === 'a' ? 'aborted' : answer === 's' ? 'skipped' : 'done';
     steps.push({ id, outcome, at: new Date().toISOString() });
     if (outcome === 'aborted') throw Object.assign(new Error(`Operator aborted at ${id}`), { aborted: true });
+    if (outcome === 'skipped') verdict.skip(id, 'operator skipped');
     return outcome;
   };
   const ask = async question => (await readline.question(`[${name}] ${question} `)).trim();
@@ -116,7 +120,7 @@ export async function runCli({ name, file, options = {}, gate, sessions = [] }) 
   };
   const clients = {};
   const startedAt = new Date().toISOString();
-  let verdict = new Verdict(), calls = [], error = null, extra = {};
+  let calls = [], error = null, extra = {};
   try {
     clients.primary = await open(values.target, 'primary');
     for (const { option, role } of sessions) {

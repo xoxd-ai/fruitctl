@@ -249,7 +249,8 @@ saves every returned frame with its SHA-256, and writes
 `<gate>-result.json` (`fruitctl.live-qualification.v1`): every check with its
 expected and observed value, operator steps, and each call's code and
 latency. A gate is `passed` only when every check ran and passed; a skipped
-step makes it `incomplete`. Exit 0 is `passed`, 1 is `failed` or
+step makes it `incomplete`, and the gate sends no input that depended on it
+(skipping the TextEdit step ends gates (c) and (d) before any paste or typing). Exit 0 is `passed`, 1 is `failed` or
 `incomplete`, 2 is a usage or transport error. Drivers never launch an app,
 change a setting, answer a dialog or run anything on the target; the
 operator does that when a step asks. Output is private evidence.

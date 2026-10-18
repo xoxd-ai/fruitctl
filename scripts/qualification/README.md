@@ -225,10 +225,15 @@ it at the `--control` path. The image must be the remote display alone, edge to
 edge (Chrome Remote Desktop full screen, or cropped to the remote display): the
 gate checks the outer ring, so local window chrome around it cannot anchor. The
 gate reads it after the last frame and requires the signature on at least half
-of the outer ring on every side, and a file modification time no earlier than
+of the outer ring on the bottom, left and right sides (D46), and a file modification time no earlier than
 the start of the series, so a control left from an earlier run cannot anchor a
-new one. Without such a control the result is `unanchored` (exit 1), never
-`passed`. An unreadable agent frame fails as `undecodable_frame` and is saved.
+new one. The top side is measured and reported but does not gate: macOS
+draws the menu bar above the overlay, so on a target whose menu bar is
+visible the top ring is menu bar, not overlay (PZM, 2026-10-18: top 45/5120
+tinted, bottom 5120/5120, left and right 2767/2880). The receipt also records
+the most-tinted band within the top 4% of the frame (`topBelowMenuBar`), where
+the overlay's feather is already fainter. Without such a control the result
+is `unanchored` (exit 1), never `passed`. An unreadable agent frame fails as `undecodable_frame` and is saved.
 
 `overlay-exclusion-receipt.json` in the new output directory records each
 frame's hash, latency, overlay pixel count and label failures. Exit 0 is
@@ -261,6 +266,17 @@ just qualification-live GATE PROFILE /abs/broker.sock /abs/new-output-dir [gate 
 # --fruitctl /abs/installed/fruitctl selects the installed launcher under test.
 ```
 
+`overlay_600` opens a second, raw-route session for its positive control. One
+broker refuses two profiles for the same desktop (one input owner per Mac), so
+run that control through its own observation-only broker: a separate config
+whose only profile is the raw route over its own VNC tunnel endpoint (for
+example `127.0.0.1:15901` forwarded to the target's 5900), with no `targetId`
+shared with the Host profile, started on its own socket and passed as
+`--control-socket`. The control session sends only `health` and one
+`screenshot`. Without `--control-socket` it uses `--socket`, which works only
+when that broker serves both profiles (TIN-6654).
+
+
 **Prerequisites.** Node 24 with `npm ci`; the release under test installed on
 the Darwin controller and its broker running; the Host installed, capture
 enabled, Screen Recording and Accessibility granted (expect one Screen
@@ -280,7 +296,7 @@ mode 0600. Never allowlist a real credential for this kit.
 | 3 | `clipboard` (c) | `--read-disabled-target pzm-noclip` | Focus an empty plain-text TextEdit document | `paste` of emoji/CJK text round-trips through `clipboard_read` exactly, `utf8`, `fresh: true`; a routed `key_type` reports `kind: "paste"` and the clipboard reads back the saved value; `pzm-noclip` refuses `clipboard_read_disabled` with no text |
 | 4 | `type_secret` (d) | `--ref qual-canary` | Focus an empty plain-text TextEdit document | An unlisted ref is refused `secret_ref_not_allowed`; `type_secret` succeeds with no value in its result; copying the typed text makes `clipboard_read` return `redacted: true`, which the broker does only for a declared secret; the field and clipboard are cleared |
 | 4b | journal check | on the broker host: `node scripts/qualification/live_type_secret.mjs --check-journal FILE --secret-file PATH` | Choose the newest `journal/<session>.jsonl` (`ls -t`) | The chain verifies, the canary appears nowhere, and every `type_secret` record keeps only `ref`, `x`, `y`, `provider`, `length_class` |
-| 5 | `overlay_600` (e) | `--control-target pzm-raw [--control-at 300] [--save-frames]` | Show the scene fixture full screen, or a desktop with neutral edges | 600 Host frames at 100 ms, all attested Host labels, none with the overlay in any 4 px edge band, and 95% within 5 s; the raw VNC control taken mid-series, while the Host lease is up, shows the overlay on at least half of every band. This is the D41/D42 gate receipt (`overlay-exclusion-receipt.json`) |
+| 5 | `overlay_600` (e) | `--control-target pzm-raw --control-socket /abs/raw-broker.sock [--control-at 300] [--save-frames]` | Show the scene fixture full screen, or a desktop with neutral edges | 600 Host frames at 100 ms, all attested Host labels, none with the overlay in any 4 px edge band, and 95% within 5 s; the raw VNC control taken mid-series, while the Host lease is up, shows the overlay on at least half of the bottom, left and right bands (D46). This is the D41/D42 gate receipt (`overlay-exclusion-receipt.json`) |
 | 6 | relay journey (f) | checklist below | | |
 
 Gate (e) uses the edge-band detector of the attended 2026-10-17 run

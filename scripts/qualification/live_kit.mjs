@@ -89,10 +89,10 @@ export async function runCli({ name, file, options = {}, gate, sessions = [] }) 
   const fruitctl = values.fruitctl ?? fileURLToPath(new URL('../../bin/fruitctl.mjs', import.meta.url));
   const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
   const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js');
-  const open = async (target, role) => {
+  const open = async (target, role, socket = values.socket) => {
     const script = /\.(m?js)$/.test(fruitctl);
     const transport = new StdioClientTransport({ command: script ? process.execPath : fruitctl,
-      args: [...(script ? [fruitctl] : []), 'mcp', '--target', target, '--socket', values.socket] });
+      args: [...(script ? [fruitctl] : []), 'mcp', '--target', target, '--socket', socket] });
     const client = new Client({ name: `fruitctl-live-${name}-${role}`, version: '1' });
     await client.connect(transport);
     return client;
@@ -118,13 +118,19 @@ export async function runCli({ name, file, options = {}, gate, sessions = [] }) 
     await writeFile(path.join(output, base), image.bytes, { flag: 'wx', mode: 0o600 });
     return base;
   };
-  const clients = {};
+  const clients = {}, sockets = { primary: values.socket };
   const startedAt = new Date().toISOString();
   let calls = [], error = null, extra = {};
   try {
     clients.primary = await open(values.target, 'primary');
-    for (const { option, role } of sessions) {
-      if (values[option]) clients[role] = await open(values[option], role);
+    // A second session may need its own broker: one broker refuses two
+    // profiles for the same desktop (one input owner per Mac, TIN-6654).
+    for (const { option, role, socketOption } of sessions) {
+      if (!values[option]) continue;
+      const socket = (socketOption && values[socketOption]) || values.socket;
+      if (!path.isAbsolute(socket)) throw new Error(`--${socketOption} must be an absolute path`);
+      sockets[role] = socket;
+      clients[role] = await open(values[option], role, socket);
     }
     const recorders = Object.fromEntries(Object.entries(clients).map(([role, client]) => [role,
       recorder((tool, args) => client.callTool({ name: tool, arguments: args }),
@@ -141,7 +147,7 @@ export async function runCli({ name, file, options = {}, gate, sessions = [] }) 
   }
   const status = error ? 'failed' : verdict.status;
   const result = { schema: RESULT_SCHEMA, gate: name, status, startedAt, finishedAt: new Date().toISOString(),
-    target: values.target, socket: values.socket, fruitctl, failures: verdict.failures(),
+    target: values.target, socket: values.socket, sockets, fruitctl, failures: verdict.failures(),
     checks: verdict.checks, skipped: verdict.skipped, operatorSteps: steps, ...(error ? { error } : {}),
     ...extra, calls };
   await writeFile(path.join(output, `${name}-result.json`), JSON.stringify(result, null, 2) + '\n',

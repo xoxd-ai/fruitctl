@@ -20,13 +20,24 @@ export const PURPLE_EXCESS_THRESHOLD = 12;
 // The outer ring sits inside the overlay's strongest band (feather >= 80 pt)
 // and outside the scene fixture's 16-pixel marker margin.
 export const ringWidth = (width, height) => Math.max(2, Math.floor(Math.min(width, height) / 100));
-// A control frame anchors the gate when the overlay covers this much of every side.
+// A control frame anchors the gate when the overlay covers this much of the
+// bottom, left and right sides (D46). macOS draws the menu bar above the
+// overlay, so on a target whose menu bar is visible (the target profile
+// requires it) the top ring is menu bar, not overlay: on PZM's 2026-10-18
+// control the top ring was 45/5120 tinted while bottom was 5120/5120 and left
+// and right 2767/2880. The top is still measured and reported, both at the
+// ring and in the best band just below the menu bar, but it does not gate.
 export const CONTROL_SIDE_FRACTION = 0.5;
+export const CONTROL_REQUIRED_SIDES = Object.freeze(['bottom', 'left', 'right']);
+// The menu bar is at most 37 pt on a notched display; 4% of the frame height
+// bounds the scan (43 px at 1080, 29 px at 720) at any scale.
+export const MENU_BAR_MAX_FRACTION = 0.04;
 export const SLO_LATENCY_MS = 5000; // docs/slo.md: warm capture within 5 s
 export const SLO_FRACTION = 0.95;
 const ALLOWED_ACTIONS = new Set(['health', 'screenshot']);
 
 const purpleExcess = (r, g, b) => Math.min(r, b) - g;
+const fixtureHit = (r, g, b) => purpleExcess(r, g, b) >= PURPLE_EXCESS_THRESHOLD;
 
 /** Count overlay-coloured pixels: per ring side, and anywhere in the frame. */
 export function overlaySignature({ width, height, pixels }) {
@@ -36,7 +47,7 @@ export function overlaySignature({ width, height, pixels }) {
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const offset = (y * width + x) * 4;
-      const hit = purpleExcess(pixels[offset], pixels[offset + 1], pixels[offset + 2]) >= PURPLE_EXCESS_THRESHOLD;
+      const hit = fixtureHit(pixels[offset], pixels[offset + 1], pixels[offset + 2]);
       const inSides = [y < ring && 'top', y >= height - ring && 'bottom', x < ring && 'left', x >= width - ring && 'right'];
       for (const side of inSides) if (side) { sides[side].pixels++; if (hit) sides[side].tinted++; }
       if (!hit) continue;
@@ -47,8 +58,28 @@ export function overlaySignature({ width, height, pixels }) {
     bounds: tinted ? { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 } : null };
 }
 
+const sideCovered = side => Boolean(side) && side.pixels > 0 && side.tinted / side.pixels >= CONTROL_SIDE_FRACTION;
+
 export function controlAnchored(signature) {
-  return Object.values(signature.sides).every(side => side.pixels > 0 && side.tinted / side.pixels >= CONTROL_SIDE_FRACTION);
+  return CONTROL_REQUIRED_SIDES.every(name => sideCovered(signature.sides[name]));
+}
+
+/** The most-tinted ring-high band in the top rows that a menu bar can cover,
+ * excluding the left and right rings. Diagnostic only: it never anchors alone. */
+export function topBelowMenuBar({ width, height, pixels }, hit, ring) {
+  const limit = Math.min(height - ring, Math.max(ring, Math.ceil(height * MENU_BAR_MAX_FRACTION)));
+  let best = { insetPx: 0, pixels: 0, tinted: 0 };
+  for (let top = 0; top <= limit; top++) {
+    let count = 0, tinted = 0;
+    for (let y = top; y < top + ring; y++) {
+      for (let x = ring; x < width - ring; x++) {
+        const offset = (y * width + x) * 4;
+        count++; if (hit(pixels[offset], pixels[offset + 1], pixels[offset + 2])) tinted++;
+      }
+    }
+    if (count && (!best.pixels || tinted / count > best.tinted / best.pixels)) best = { insetPx: top, pixels: count, tinted };
+  }
+  return { ...best, covered: sideCovered(best) };
 }
 
 // The edge-band detector that worked in the attended 2026-10-17 run on a real
@@ -63,6 +94,8 @@ export const EDGE_BAND_TINT = Object.freeze({ redOverGreen: 25, blueOverGreen: 4
 // a ring, so it fills a band; isolated purple content pixels do not.
 export const EDGE_BAND_LEAK_FRACTION = 0.01;
 
+const edgeBandHit = (r, g, b) => r - g >= EDGE_BAND_TINT.redOverGreen && b - g >= EDGE_BAND_TINT.blueOverGreen;
+
 export function edgeBandSignature({ width, height, pixels }) {
   const band = Math.min(EDGE_BAND_PX, Math.floor(Math.min(width, height) / 2));
   const sides = Object.fromEntries(['top', 'bottom', 'left', 'right'].map(side => [side, { pixels: 0, tinted: 0 }]));
@@ -72,7 +105,7 @@ export function edgeBandSignature({ width, height, pixels }) {
     for (let x = 0; x < width; x++) {
       if (!rowEdge && x >= band && x < width - band) { x = width - band - 1; continue; }
       const offset = (y * width + x) * 4, r = pixels[offset], g = pixels[offset + 1], b = pixels[offset + 2];
-      const hit = r - g >= EDGE_BAND_TINT.redOverGreen && b - g >= EDGE_BAND_TINT.blueOverGreen;
+      const hit = edgeBandHit(r, g, b);
       const inSides = [y < band && 'top', y >= height - band && 'bottom', x < band && 'left', x >= width - band && 'right'];
       for (const side of inSides) if (side) { sides[side].pixels++; if (hit) sides[side].tinted++; }
       if (hit) tinted++;
@@ -82,9 +115,9 @@ export function edgeBandSignature({ width, height, pixels }) {
 }
 
 export const DETECTORS = Object.freeze({
-  fixture: { signature: overlaySignature, leaked: signature => signature.tinted > 0,
+  fixture: { signature: overlaySignature, hit: fixtureHit, leaked: signature => signature.tinted > 0,
     parameters: { rgb: OVERLAY_RGB, purpleExcessThreshold: PURPLE_EXCESS_THRESHOLD } },
-  'edge-band': { signature: edgeBandSignature,
+  'edge-band': { signature: edgeBandSignature, hit: edgeBandHit,
     leaked: signature => Object.values(signature.sides).some(side => side.tinted / side.pixels >= EDGE_BAND_LEAK_FRACTION),
     parameters: { bandPx: EDGE_BAND_PX, ...EDGE_BAND_TINT, leakFraction: EDGE_BAND_LEAK_FRACTION } },
 });
@@ -174,9 +207,13 @@ export async function runGate({ call, readControl, frames = 600, intervalMs = 10
     max: latencies.at(-1) ?? null, withinLimit: within, limitMs: latencyLimitMs };
   // The control is read last, so it can be captured while this series runs.
   const controlFile = await readControl();
-  let control = null, controlError = null;
+  let control = null, controlError = null, controlTop = null;
   if (controlFile) {
-    try { control = detection.signature(decodePNG(controlFile.bytes)); } catch (error) { controlError = error.message; }
+    try {
+      const decoded = decodePNG(controlFile.bytes);
+      control = detection.signature(decoded);
+      controlTop = topBelowMenuBar(decoded, detection.hit, control.ring);
+    } catch (error) { controlError = error.message; }
   }
   const capturedDuringRun = Boolean(controlFile && Number.isFinite(controlFile.modifiedAtMs) &&
     controlFile.modifiedAtMs >= startedAtMs);
@@ -188,7 +225,8 @@ export async function runGate({ call, readControl, frames = 600, intervalMs = 10
   return { schema: 'fruitctl.overlay-exclusion-gate.v1', status, failure, framesRequested: frames,
     framesCaptured: records.length, intervalMs, durationMs, latency,
     control: controlFile && { anchored, capturedDuringRun, modifiedAtMs: controlFile.modifiedAtMs, startedAtMs,
-      ...(control ? { ring: control.ring, sides: control.sides, overlayPixels: control.tinted } : { error: controlError }) },
+      ...(control ? { ring: control.ring, sides: control.sides, overlayPixels: control.tinted,
+        requiredSides: CONTROL_REQUIRED_SIDES, topBelowMenuBar: controlTop } : { error: controlError }) },
     overlay: { detector, ...detection.parameters },
     records, scope: 'Host-route agent frames versus the Host overlay only; no scene, consent, Stop, input or SLO qualification' };
 }

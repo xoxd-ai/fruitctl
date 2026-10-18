@@ -4,7 +4,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { deflateSync } from 'node:zlib';
 import { scene } from './qualification/scene.mjs';
-import { overlaySignature, controlAnchored, runGate, OVERLAY_RGB, DETECTORS, edgeBandSignature } from '../scripts/qualification/overlay_exclusion_gate.mjs';
+import { overlaySignature, controlAnchored, runGate, OVERLAY_RGB, DETECTORS, edgeBandSignature,
+  topBelowMenuBar } from '../scripts/qualification/overlay_exclusion_gate.mjs';
 
 const runId = '0123456789abcdef0123456789abcdef';
 const width = 960, height = 640;
@@ -101,6 +102,29 @@ test('edge-band detector: anchors on the overlay over a real desktop and passes 
     assert.ok(controlAnchored(signature), JSON.stringify(signature.sides));
     assert.ok(edge.leaked(signature));
   }
+});
+
+// D46: macOS draws the menu bar above the overlay, so the control's top ring
+// is menu bar (PZM 2026-10-18: top 45/5120, bottom 5120/5120, sides 2767/2880).
+test('control: a menu bar over the top edge still anchors on bottom, left and right; missing sides do not', () => {
+  const edge = DETECTORS['edge-band'];
+  const menuBar = frame => {
+    const pixels = Uint8Array.from(frame.pixels), bar = Math.round(frame.height * 0.022);
+    for (let y = 0; y < bar; y++) for (let x = 0; x < frame.width; x++) pixels.set([236, 236, 236, 255], (y * frame.width + x) * 4);
+    return { ...frame, pixels };
+  };
+  const covered = menuBar(withOverlay(desktop()));
+  const signature = edgeBandSignature(covered);
+  assert.ok(signature.sides.top.tinted / signature.sides.top.pixels < 0.5, JSON.stringify(signature.sides.top));
+  assert.ok(controlAnchored(signature), JSON.stringify(signature.sides));
+  const top = topBelowMenuBar(covered, edge.hit, signature.ring);
+  // Diagnostic only: the band under the bar is fainter (feather alpha falls off), so it is reported, never required.
+  assert.ok(top.pixels > 0 && top.insetPx <= Math.ceil(height * 0.04), JSON.stringify(top));
+  // Fail closed: no overlay, or a required side missing, never anchors.
+  assert.ok(!controlAnchored(edgeBandSignature(menuBar(desktop()))));
+  const noBottom = withOverlay(desktop());
+  for (let y = height - 8; y < height; y++) for (let x = 0; x < width; x++) noBottom.pixels.set([30, 30, 30, 255], (y * width + x) * 4);
+  assert.ok(!controlAnchored(edgeBandSignature(noBottom)));
 });
 
 const hostLabels = { route: 'host', indicator: 'present', capture_backend: 'owned_sck',

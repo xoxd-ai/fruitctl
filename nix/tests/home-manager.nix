@@ -190,6 +190,7 @@ let
     && rejected "aarch64-darwin" (pkgs.lib.recursiveUpdate (uuidHelper null) { targets.desktop.hostHelper.displayUuid = null; })
     # The broker accepts only the FruitctlHost executable and an alias-shaped sshHost.
     && rejected "aarch64-darwin" (pkgs.lib.recursiveUpdate (uuidHelper null) { targets.desktop.hostHelper.command = [ "/usr/bin/ssh" "--stdio" ]; })
+    && rejected "aarch64-darwin" (pkgs.lib.recursiveUpdate (uuidHelper null) { targets.desktop.hostHelper.command = [ "/Applications/Fruitctl\tHost/FruitctlHost" "--stdio" ]; })
     && rejected "aarch64-darwin" (pkgs.lib.recursiveUpdate (uuidHelper null) { targets.desktop.hostHelper.sshHost = "-oProxyCommand=x"; });
   linuxRelay = linux.systemd.user.services.fruitctl-relay.Service;
   darwinBroker = darwin.launchd.agents.fruitctl-broker.config;

@@ -156,8 +156,9 @@ test('idle retirement blocks new work immediately and keeps timeout sticky after
   });
   await lane.execute([{ action: 'health' }]);
   await retiring.promise;
-  assert.throws(() => lane.acquire('owner'), /releasing/);
-  await assert.rejects(lane.execute([{ action: 'key_tap', key: 'tab' }]), /releasing/);
+  // Typed and pre-admission: the idle close keeps the owner's lease.
+  assert.throws(() => lane.acquire('owner'), { code: 'target_idle_retiring' });
+  await assert.rejects(lane.execute([{ action: 'key_tap', key: 'tab' }]), { code: 'target_idle_retiring' });
   await lane.tail;
   const sticky = lane.cleanupFailure;
   assert.equal(sticky.code, 'release_unconfirmed');
@@ -186,7 +187,7 @@ test('healthy idle retirement shares release and close budget then permits the s
   await lane.execute([{ action: 'health' }]);
   await retiring.promise;
   const originalDeadline = lane.idleDeadline;
-  assert.throws(() => lane.acquire('owner'), /releasing/);
+  assert.throws(() => lane.acquire('owner'), { code: 'target_idle_retiring' });
   finishRelease.resolve();
   await lane.tail;
   assert.ok(releaseBudget > 0 && releaseBudget <= 200);

@@ -390,6 +390,60 @@ reports `release_unconfirmed`, with the sanitized Host cause for diagnosis;
 the target stays revoked and requires operator reconciliation. These source
 diagnostics do not qualify capture or grant macOS permission.
 
+## Error codes
+
+The native daemon, FruitctlHost, the Darwin broker, the Linux relay and the
+MCP server share one error `code` field. Numeric codes are JSON-RPC and belong
+to the native processes; the broker only relays them, except that the Host
+route raises `-32013` itself with the daemon's meaning. Broker codes are
+strings. This table is the register: a new code is added here in the same
+change that raises it, and `test/fruitctl-error-codes.test.js` fails on a code
+in `lib/`, `ClaudeKVM-Daemon/` or `FruitctlHost/` that is missing. `-32001` to
+`-32009` and `-32015` upward are unassigned.
+
+| Code | Raised by | Meaning |
+| --- | --- | --- |
+| `-32700` | daemon | Request line is not JSON |
+| `-32600` | daemon, Host | Invalid request, including one over the line limit |
+| `-32601` | daemon, Host | Unknown method (Host: `unsupported_host_action`) |
+| `-32000` | daemon, Host | Untyped failure; no `data` |
+| `-32010` | daemon | `stale_screen`: no fresh complete frame; `data.reason`, `data.diagnostics` |
+| `-32011` | daemon | Input refused before any event; `data.reason` |
+| `-32012` | daemon | Observation condition unmet: `stable_timeout`, `change_not_observed` |
+| `-32013` | daemon, Host route | `input_not_ready`: settle time does not fit the deadline; no event written |
+| `-32014` | daemon | `clipboard_unavailable`: `clipboard_read` failed or is off; `data.reason` |
+| `unsupported_action` | broker, MCP | The backend does not offer the action |
+| `unsupported_on_route` | broker | The action exists only on the other route |
+| `unsupported_expectation` | MCP | The step cannot carry the requested `expect` |
+| `invalid_deadline` | broker | `timeoutMs` is not a positive number of milliseconds |
+| `target_idle_retiring` | broker | The owner's idle connection is closing; retry |
+| `clipboard_read_disabled` | broker | `clipboard.read` is off for this target |
+| `invalid_secret_request` | broker, relay | `type_secret` is not `{ref, x?, y?}` |
+| `secret_ref_not_allowed` | broker | The ref is not in this target's `secrets` allowlist |
+| `secret_unavailable` | broker | A provider failed; `data.reason`, `data.ref`, `data.provider` |
+| `human_stop_latched` | broker, Host route | The human Stop is latched |
+| `human_consent_required` | sentinel, Host | A consent or system dialog is on screen; `data.owner`, `data.kind` |
+| `target_locked` | sentinel | Locked screen or login window; `data.console` |
+| `display_asleep` | sentinel, wake | The target display is asleep |
+| `accessibility_permission_required` | Host route, Host | FruitctlHost lacks the Accessibility grant |
+| `stale_ref` | Host route, Host | The element ref is not in the latest `ax_snapshot` |
+| `ax_unreachable` | Host | The element can no longer be reached |
+| `ax_action_unsupported` | Host | The element does not offer the action |
+| `credential_unavailable` | broker | The VNC credential provider failed at startup |
+| `release_unconfirmed` | broker, relay, executors | Release is unconfirmed; the target stays revoked until reconciled |
+| `operation_failed` | broker | Any other error crossing the broker socket |
+| `broker_unavailable` | client | The broker socket is not reachable |
+| `bridge_unreachable`, `bridge_auth_refused`, `bridge_host_key`, `bridge_command_missing`, `bridge_attach_failed`, `bridge_broker_unavailable` | relay | The SSH bridge (D20) did not deliver the request |
+| `bridge_protocol`, `bridge_lost`, `bridge_unconfirmed` | relay | The bridge failed with work in flight; nothing is replayed |
+| `relay_config`, `relay_listener_failed` | relay | The relay could not start |
+
+"Host route" is the broker's host-helper executor; "Host" is FruitctlHost
+itself. A string code raised by the broker before admission (lane, secret,
+clipboard, sentinel or a Host route check) means nothing was sent and the
+lease is kept. The same code in a FruitctlHost reply, or `display_asleep`
+from an executor, follows an admitted request and retires the lane. Secret
+providers run only after every pre-admission refusal has passed.
+
 ## FuzzyBot spell
 
 Fruitctl Host remains an unqualified source prototype. Public runtime previews

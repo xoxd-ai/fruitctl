@@ -93,6 +93,10 @@ focus the field first. Then:
   `secret_ref_not_allowed`. A provider failure is refused with
   `secret_unavailable`, naming the ref, provider kind and reason. Nothing is
   sent to the target, and the session keeps its lease.
+- The batch joins the target's queue in arrival order. The broker runs the
+  provider only after every refusal that sends nothing has passed: the
+  desktop-state sentinel, the backend's capabilities, the route and the Stop
+  latch. A refused batch never reads its secret.
 - The broker resolves the value and hands it to the native controller as a
   private request field on its stdin pipe. The controller plans every
   character before sending anything, so an untypable secret sends neither the

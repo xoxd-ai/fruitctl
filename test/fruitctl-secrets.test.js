@@ -17,7 +17,7 @@ import { BrokerExecutor } from '../lib/broker/client.mjs';
 import { Journal, verifyJournal } from '../lib/broker/journal.mjs';
 import { ActionObserver } from '../lib/broker/observe.mjs';
 import { McpSession } from '../lib/mcp/server.js';
-import { isPreAdmissionRefusal } from '../lib/mcp/capabilities.js';
+import { isPreAdmissionRefusal, requireNativeActions } from '../lib/mcp/capabilities.js';
 import { validateActionParameters } from '../tools/index.js';
 
 const run = promisify(execFile);
@@ -289,10 +289,55 @@ test('a batch sent while a secret resolves runs after it, in arrival order', asy
   assert.equal(calls[0].secret, SECRET);
 });
 
+/** A command provider that records each run in `marker`. */
+function countedSecret(marker, delayMs = 0) {
+  return { provider: 'command', argv: [node, '-e', `require('fs').appendFileSync(${JSON.stringify(marker)}, 'x');` +
+    `setTimeout(() => process.stdout.write(${JSON.stringify(SECRET)}), ${delayMs})`] };
+}
+const runs = marker => fs.readFile(marker, 'utf8').then(text => text.length, () => 0);
+
+test('a provider runs only after every pre-admission refusal, and a bad deadline is refused typed', async t => {
+  const dir = await directory(t);
+  const marker = path.join(dir, 'runs');
+  const profile = { secrets: { login: countedSecret(marker) } };
+  // A native backend without type_secret refuses it at preflight.
+  const executor = { capabilities: { known: true, actions: ['wait'] },
+    preflight(actions) { requireNativeActions(actions, this.capabilities); },
+    async execute() { assert.fail('nothing is admitted'); }, async close() {} };
+  const lane = new TargetLane(profile, async () => executor);
+  t.after(() => lane.close());
+  lane.acquire('0a0a0a0a-0b0b-4c0c-8d0d-0e0e0e0e0e0e');
+  await assert.rejects(lane.execute([{ action: 'type_secret', ref: 'login' }]),
+    error => error.code === 'unsupported_action' && isPreAdmissionRefusal(error));
+  for (const timeoutMs of [-1, 0, 'soon', Number.NaN, null]) {
+    await assert.rejects(lane.execute([{ action: 'type_secret', ref: 'login' }], { timeoutMs }),
+      error => error.code === 'invalid_deadline' && isPreAdmissionRefusal(error), String(timeoutMs));
+  }
+  assert.equal(await runs(marker), 0, 'the provider never ran');
+  assert.ok(!lane.releasing && lane.owner, 'the lease survives every refusal');
+});
+
+test('an idle timer cannot retire the lane under a slow provider', async t => {
+  const dir = await directory(t);
+  const { calls, executor } = recordingExecutor();
+  // A slow idle close would still be running when the provider returns.
+  executor.close = () => delay(400);
+  const lane = new TargetLane({ secrets: { slow: countedSecret(path.join(dir, 'runs'), 150) } },
+    async () => executor, { idleMs: 40 });
+  t.after(() => lane.close());
+  lane.acquire('0a0a0a0a-0b0b-4c0c-8d0d-0e0e0e0e0e0e');
+  await lane.execute([{ action: 'wait' }]);
+  // The idle timer is armed; the provider outlasts it.
+  const [typed] = await lane.execute([{ action: 'type_secret', ref: 'slow' }]);
+  assert.deepEqual(typed, { id: 0, result: { detail: 'OK' } });
+  assert.equal(calls.at(-1).secret, SECRET);
+});
+
 test('type_secret refusals are typed, pre-admission and start nothing', async t => {
   const { profile } = await secretProfile(t);
   let started = 0;
-  const lane = new TargetLane(profile, async () => { started++; return recordingExecutor().executor; }, { name: 'desk' });
+  const recorder = recordingExecutor();
+  const lane = new TargetLane(profile, async () => { started++; return recorder.executor; }, { name: 'desk' });
   t.after(() => lane.close());
   const refused = (actions, code, pattern) => assert.rejects(lane.execute(actions), error => {
     assert.equal(error.code, code);
@@ -305,13 +350,19 @@ test('type_secret refusals are typed, pre-admission and start nothing', async t 
   await refused([{ action: 'type_secret', ref: 'login', text: SECRET }], 'invalid_secret_request', /never travels/);
   await refused([{ action: 'type_secret', ref: 'login', secret: SECRET }], 'invalid_secret_request', /never travels/);
   await refused([{ action: 'type_secret', ref: 'login', x: 1 }], 'invalid_secret_request', /x\?, y\?/);
+  assert.equal(started, 0, 'a request refused by shape or allowlist starts nothing');
+  // A provider runs only after every pre-admission gate, so its failure can
+  // follow startup; it still sends nothing and keeps the lease.
+  lane.acquire('0a0a0a0a-0b0b-4c0c-8d0d-0e0e0e0e0e0e');
   await refused([{ action: 'wait' }, { action: 'type_secret', ref: 'gone' }], 'secret_unavailable', /gone is unavailable: file provider missing/);
-  assert.equal(started, 0, 'no executor started and no input was admitted');
+  assert.deepEqual(recorder.calls, []);
+  assert.ok(!lane.releasing && lane.owner);
   // A target without an allowlist has no refs at all.
-  const bare = new TargetLane({}, async () => { started++; return recordingExecutor().executor; });
+  let bareStarted = 0;
+  const bare = new TargetLane({}, async () => { bareStarted++; return recordingExecutor().executor; });
   t.after(() => bare.close());
   await assert.rejects(bare.execute([{ action: 'type_secret', ref: 'login' }]), { code: 'secret_ref_not_allowed' });
-  assert.equal(started, 0);
+  assert.equal(bareStarted, 0);
 });
 
 test('a failed native type_secret never echoes its text; pre-input refusals say so', async t => {

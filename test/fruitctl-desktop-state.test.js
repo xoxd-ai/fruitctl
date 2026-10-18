@@ -184,12 +184,15 @@ test('D16: type_secret is never typed into a consent dialog', async t => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'fruitctl-desk-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const secret = 'correct horse battery staple';
-  await fs.writeFile(path.join(dir, 'login'), secret, { mode: 0o600 });
+  // The provider records each run: a refused batch never resolves its ref.
+  const marker = path.join(dir, 'runs');
+  const login = { provider: 'command', argv: [process.execPath, '-e',
+    `require('fs').appendFileSync(${JSON.stringify(marker)}, 'x'); process.stdout.write(${JSON.stringify(secret)})`] };
   const { probe } = sentinelProbe([variant({ desktop_windows: windows('window|824|8|500|300|1') })]);
   const { factory, sent } = recordingFactory();
   let started = 0;
   const lane = new TargetLane({ desktopState: { ssh: 'op@mac' },
-    secrets: { login: { provider: 'file', path: path.join(dir, 'login') } } },
+    secrets: { login } },
   (...args) => { started++; return factory(...args); }, { desktopProbe: probe });
   t.after(() => lane.close());
   await assert.rejects(lane.execute([{ action: 'type_secret', ref: 'login' }]), error => {
@@ -200,6 +203,7 @@ test('D16: type_secret is never typed into a consent dialog', async t => {
   });
   assert.equal(started, 0);
   assert.deepEqual(sent, []);
+  await assert.rejects(fs.stat(marker), { code: 'ENOENT' }, 'the secret was never resolved');
 });
 
 test('Host element actions never press or focus under a consent dialog', async t => {

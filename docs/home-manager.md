@@ -287,9 +287,14 @@ configuration. Linux gets no broker credential document and no native package.
 
 The Linux relay keeps its local socket when the bridge drops and reconnects
 on its own. Backoff starts at about one second and doubles to a 30-second cap,
-with ±20% jitter. It resets once the remote `attach --mux` says hello. A
-successor SSH child starts only after the previous one has exited. Nothing a
-client sent over a lost link is replayed:
+with ±20% jitter. It resets only after a link has stayed up for 30 s, so a
+bridge that greets and then drops keeps backing off instead of retrying every
+second. SSH keepalives retire a dead network within about 15 s. The relay also
+probes the remote `attach --mux` every 15 s and retires a link that sent
+nothing for 45 s, which covers a live SSH session whose remote end stopped
+answering. A successor SSH child starts only after the previous one has exited.
+Each retry is logged with its cause, attempt number and how long the lost link
+was up. Nothing a client sent over a lost link is replayed:
 
 | Client state when the link fails | Typed error |
 | --- | --- |
@@ -298,7 +303,7 @@ client sent over a lost link is replayed:
 | Connects while the bridge is down | the last classified cause, answered at once, or `bridge_unreachable` with reason `reconnecting` when the last loss was `bridge_lost` or `bridge_protocol` |
 
 The classified causes are `bridge_unreachable`, with reason `dns`, `refused`,
-`network`, `ssh`, `ssh_unavailable` or `reconnecting`, and `bridge_auth_refused`,
+`network`, `ssh`, `ssh_unavailable`, `unresponsive` or `reconnecting`, and `bridge_auth_refused`,
 `bridge_host_key`, `bridge_command_missing`, `bridge_attach_failed`,
 `bridge_protocol` and `bridge_broker_unavailable`. They come from SSH's exit
 status and stderr, which is read only on the seat: its text never reaches a
@@ -317,9 +322,10 @@ outliving it.
 `fruitctl relay --health` asks the running relay for its state without
 touching the bridge. It prints a `fruitctl.relay-health.v1` document with
 `state` (`connecting`, `up`, `down` or `closing`), `attempts`, `retryInMs` and
-`lastError`, and it exits 0 only while the bridge is up. An older Darwin
-`attach` sends no hello, so with one the relay reports `connecting` until the
-first session is answered.
+`lastError`, and it exits 0 only while the bridge is up. `attempts` stays
+non-zero until the current link has been up for 30 s. An older Darwin
+`attach` sends no hello, so with one the relay reports `connecting` until it
+answers the first probe or session.
 
 On Linux, the module exports `FRUITCTL_SOCKET_PATH` and `FRUITCTL_BRIDGE_HOST`,
 plus `FRUITCTL_BRIDGE_COMMAND` when `bridgeCommand` is not the default. Health

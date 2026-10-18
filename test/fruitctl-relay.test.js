@@ -113,7 +113,7 @@ test('an unreachable bridge gives clients a typed error, keeps the socket, and r
   assert.deepEqual(children[1].args, children[0].args);
   children[1].hello();
   await waitUntil(() => relay.health().state === 'up', 'hello marks the bridge up');
-  assert.equal(relay.health().attempts, 0);
+  assert.equal(relay.health().attempts, 1, 'a hello alone does not reset backoff');
   assert.equal(relay.health().lastError, null);
 
   const second = openExecutor(socketPath);
@@ -124,6 +124,61 @@ test('an unreachable bridge gives clients a typed error, keeps the socket, and r
   assert.deepEqual(children[1].packets.map(frame => frame.packet.kind), ['open'],
     'neither the failed nor the refused client is replayed onto the successor');
   await second.close();
+});
+
+test('backoff resets only after a link stays up stableMs, not on hello', async t => {
+  let clock = 0;
+  const { relay, children, logs } = await supervisedRelay(t, { relay: { now: () => clock,
+    backoff: { initialMs: 10, maxMs: 1000, stableMs: 1000 } } });
+  const flap = async (index, upMs) => {
+    children[index].hello();
+    await waitUntil(() => relay.health().state === 'up', `link ${index} up`);
+    clock += upMs;
+    children[index].exit(255, 'Connection to darwin-bridge closed by remote host.\r\n');
+    await waitUntil(() => relay.health().state === 'down' && relay.health().lastError, `link ${index} down`);
+  };
+  await flap(0, 500);
+  assert.equal(relay.health().attempts, 1);
+  await waitUntil(() => children.length === 2, 'first successor');
+  await flap(1, 500);
+  assert.equal(relay.health().attempts, 2, 'a link that greets and drops inside stableMs keeps backing off');
+  assert.equal(relay.health().retryInMs, 20);
+  assert.ok(logs.some(line => /bridge_lost; retrying in 1s \(attempt 2, link was up 1s\)/.test(line)));
+
+  await waitUntil(() => children.length === 3, 'second successor');
+  children[2].hello();
+  await waitUntil(() => relay.health().state === 'up', 'link 2 up');
+  assert.equal(relay.health().attempts, 2, 'still unproven');
+  clock += 1000;
+  assert.equal(relay.health().attempts, 0, 'stable after stableMs');
+  children[2].exit(255, 'Connection to darwin-bridge closed by remote host.\r\n');
+  await waitUntil(() => relay.health().state === 'down' && relay.health().lastError, 'link 2 down');
+  assert.equal(relay.health().attempts, 1, 'a stable link restarts backoff from the first step');
+});
+
+test('a link whose attach stops answering the probe is retired as unresponsive', async t => {
+  // Every attach, with or without hello, answers the probe on the empty channel.
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const answers = [];
+  readFrames(output, frame => { answers.push(frame); }, () => {});
+  const mux = await attachMux({ input, output, socketPath: '/nonexistent' });
+  writeFrame(input, { v: 1, channel: '', kind: 'packet', packet: { kind: 'probe' } });
+  await waitUntil(() => answers.length === 2, 'attach answers the probe');
+  assert.deepEqual(answers[1], { v: 1, channel: '', kind: 'closed' });
+  mux.close();
+
+  const { relay, socketPath, children } = await supervisedRelay(t, { relay: {
+    backoff: { initialMs: 10, maxMs: 20, probeMs: 10, silenceMs: 60 } } });
+  const executor = openExecutor(socketPath);
+  await waitUntil(() => children[0].packets.some(frame => frame.channel === '' && frame.packet.kind === 'probe'),
+    'the relay probes the remote attach');
+  await assert.rejects(executor.opened, error => error.code === 'bridge_unreachable' && /not delivered/.test(error.message));
+  assert.equal(relay.health().lastError.reason, 'unresponsive');
+  assert.deepEqual(children[0].signals.slice(0, 1), ['SIGTERM']);
+  await waitUntil(() => children.length === 2, 'a successor replaces the silent link');
+  writeFrame(children[1].stdout, { v: 1, channel: '', kind: 'closed' });
+  await waitUntil(() => relay.health().state === 'up', 'a probe answer confirms an attach without hello');
 });
 
 test('losing an answered link fails in-flight work as uncertain and never replays it', async t => {

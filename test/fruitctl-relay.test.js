@@ -168,11 +168,15 @@ test('a link whose attach stops answering the probe is retired as unresponsive',
   assert.deepEqual(answers[1], { v: 1, channel: '', kind: 'closed' });
   mux.close();
 
-  const { relay, socketPath, children } = await supervisedRelay(t, { relay: {
+  // Silence is measured on the injected clock, so a loaded runner that
+  // delays a probe tick cannot retire a link before it was probed.
+  let clock = 0;
+  const { relay, socketPath, children } = await supervisedRelay(t, { relay: { now: () => clock,
     backoff: { initialMs: 10, maxMs: 20, probeMs: 10, silenceMs: 60 } } });
   const executor = openExecutor(socketPath);
   await waitUntil(() => children[0].packets.some(frame => frame.channel === '' && frame.packet.kind === 'probe'),
     'the relay probes the remote attach');
+  clock += 60;
   await assert.rejects(executor.opened, error => error.code === 'bridge_unreachable' && /not delivered/.test(error.message));
   assert.equal(relay.health().lastError.reason, 'unresponsive');
   assert.deepEqual(children[0].signals.slice(0, 1), ['SIGTERM']);

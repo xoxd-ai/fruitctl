@@ -2201,3 +2201,41 @@ test('Host-only observations bind pixels and AX frames to the Host health geomet
     } finally { await executor.close(); }
   }
 });
+
+// TIN-5385: a Host AX press over a slow link. Live PZM over neo's Wi-Fi
+// answered ax_action in over 500 ms and latched the target; the Host itself
+// answers within its 2.5 s request bound.
+test('a slow ax_action answer within the Host bound acts and keeps the owner', async t => {
+  for (const pipelining of [false, true]) {
+    await t.test(`${pipelining ? 'pipelining' : 'serial'} Host`, async () => {
+      const { executor, vnc, host } = await fixture({ helperOptions: { ...axActionHost(),
+        serial: !pipelining, pipelining,
+        latency: request => request.action === 'ax_action' ? 1500 : 5 } });
+      try {
+        await executor.execute([{ action: 'ax_snapshot' }]);
+        const [clicked] = await executor.execute([{ action: 'click_element', ref: 'ax:77:0.0' }]);
+        assert.equal(clicked.result.ax_action.path, 'ax_press');
+        const action = host.requests.find(request => request.action === 'ax_action');
+        // The permit lapsed under the AX call and a later renewal re-armed it.
+        assert.ok(host.requests.some(request => request.action === 'renew_activity' &&
+          request.sentAt >= action.answeredAt));
+        await new Promise(resolve => setTimeout(resolve, 700));
+        assert.equal(executor.failed, undefined);
+        await executor.execute([{ action: 'ax_snapshot' }]);
+        assert.deepEqual(vnc.calls, []);
+      } finally { await executor.close(); }
+    });
+  }
+});
+
+test('an ax_action the Host never answers still retires the owner at the Host bound', async () => {
+  const { executor } = await fixture({ helperOptions: { ...axActionHost(),
+    alter: (request, response) => request.action === 'ax_action' ? null : axActionHost().alter(request, response) } });
+  try {
+    await executor.execute([{ action: 'ax_snapshot' }]);
+    const started = performance.now();
+    await assert.rejects(executor.execute([{ action: 'click_element', ref: 'ax:77:0.0' }]), /receipt deadline exceeded/);
+    assert.ok(performance.now() - started >= 2000);
+    assert.ok(executor.failed);
+  } finally { await executor.close(); }
+});

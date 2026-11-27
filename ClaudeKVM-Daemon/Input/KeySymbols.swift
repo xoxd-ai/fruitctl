@@ -172,6 +172,19 @@ func namedKeyToKeysym(_ name: String) -> UInt32? {
     case "f10": return KeySym.f10
     case "f11": return KeySym.f11
     case "f12": return KeySym.f12
+    // xdotool punctuation names resolve as their characters. "plus" is
+    // absent: "+" separates the parts of a combo string.
+    case "minus":        return charToKeysym("-").keysym
+    case "equal":        return charToKeysym("=").keysym
+    case "comma":        return charToKeysym(",").keysym
+    case "period":       return charToKeysym(".").keysym
+    case "slash":        return charToKeysym("/").keysym
+    case "backslash":    return charToKeysym("\\").keysym
+    case "semicolon":    return charToKeysym(";").keysym
+    case "apostrophe", "quote": return charToKeysym("'").keysym
+    case "grave":        return charToKeysym("`").keysym
+    case "bracketleft":  return charToKeysym("[").keysym
+    case "bracketright": return charToKeysym("]").keysym
     default:
         if name.count == 1, let ch = name.first {
             let keysym = charToKeysym(ch).keysym

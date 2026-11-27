@@ -35,6 +35,58 @@ export const INPUT_REFUSED_CODE = -32011;
 export function inputRefusal(reason, message) {
   return Object.assign(new Error(message), { code: INPUT_REFUSED_CODE, data: { reason } });
 }
+
+// Key names the native controller (KeySymbols.swift namedKeyToKeysym) or the
+// Host (HostInput.swift) resolves. Any single printable character also
+// resolves on both. An unknown name used to reach the native controller,
+// which refused it after the broker had granted an input permit; the broker
+// then could not prove the release and latched the target (TIN-5385).
+const KNOWN_KEY_NAMES = new Set([
+  'shift', 'lshift', 'rshift', 'ctrl', 'control', 'rctrl', 'alt', 'option', 'opt', 'ralt',
+  'cmd', 'command', 'meta', 'super', 'rcmd', 'tab', 'return', 'enter', 'ret', 'escape', 'esc',
+  'backspace', 'delete', 'del', 'home', 'end', 'pageup', 'pgup', 'pagedown', 'pgdn', 'pgdown',
+  'up', 'arrowup', 'down', 'arrowdown', 'left', 'arrowleft', 'right', 'arrowright', 'space', 'spc',
+  'ins', 'insert', 'capslock', 'caps', 'numlock', 'scrolllock', 'printscreen', 'print', 'prtsc',
+  'pause', 'break', 'menu', 'contextmenu', 'help',
+  ...Array.from({ length: 20 }, (_, i) => `f${i + 1}`),
+]);
+// xdotool punctuation names, sent as the character every route resolves.
+// `plus` is absent: "+" separates the parts of a combo string.
+const PUNCTUATION_KEY_NAMES = new Map(Object.entries({
+  minus: '-', equal: '=', comma: ',', period: '.', slash: '/', backslash: '\\', semicolon: ';',
+  apostrophe: "'", quote: "'", grave: '`', bracketleft: '[', bracketright: ']',
+}));
+const printableKey = name => [...name].length === 1 && name.codePointAt(0) >= 0x20 && name.codePointAt(0) !== 0x7f;
+const normalKeyName = name => typeof name === 'string'
+  ? PUNCTUATION_KEY_NAMES.get(name.toLowerCase()) ?? name : name;
+
+/** The action with punctuation key names replaced by their characters. */
+export function normalizeKeyNames(input) {
+  if (!input || typeof input !== 'object') return input;
+  if (!['key_tap', 'key_combo', 'hold_key'].includes(input.action)) return input;
+  const out = { ...input };
+  if (typeof out.key === 'string') {
+    out.key = input.action === 'key_combo' && out.key.length > 1
+      ? out.key.split('+').map(part => normalKeyName(part.trim())).join('+') : normalKeyName(out.key);
+  }
+  if (Array.isArray(out.keys)) out.keys = out.keys.map(normalKeyName);
+  return out;
+}
+
+function assertKnownKeys(input) {
+  const names = [];
+  if (typeof input.key === 'string') {
+    if (input.action === 'key_combo' && input.key.length > 1) names.push(...input.key.split('+').map(part => part.trim()));
+    else names.push(input.key);
+  }
+  if (input.action === 'key_combo' && Array.isArray(input.keys)) names.push(...input.keys);
+  for (const name of names) {
+    if (typeof name !== 'string' || !name.length || (!KNOWN_KEY_NAMES.has(name.toLowerCase()) && !printableKey(name))) {
+      throw inputRefusal('unknown_key', `Unknown key name for ${input.action}: ${JSON.stringify(name)}; ` +
+        'use a named key such as escape or a single character such as ","');
+    }
+  }
+}
 const extent = () => z.number().int().min(1).max(0x7fffffff);
 // A rectangle in the current scaled display space.
 const rect = () => z.object({ x: coordinate(), y: coordinate(), width: extent(), height: extent() });
@@ -99,6 +151,7 @@ export function validateActionParameters(input) {
       (!Array.isArray(input.keys) || input.keys.length === 0)) {
     throw new Error('Missing key or nonempty keys for key_combo');
   }
+  if (['key_tap', 'key_combo', 'hold_key'].includes(input.action)) assertKnownKeys(input);
   if (input.action === 'mouse_up' && (input.x === undefined) !== (input.y === undefined)) {
     throw new Error('mouse_up takes both x and y or neither');
   }
